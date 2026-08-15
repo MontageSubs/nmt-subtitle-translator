@@ -3,6 +3,7 @@ export interface Env {
   WORKER_PRIVATE_KEY: string;
   RATE_LIMIT_KV: KVNamespace;
   RATE_LIMIT_PER_HOUR?: string;
+  GOOGLE_TRANSLATE_API_KEY?: string;
 }
 
 const ENDPOINT = "https://translate-pa.googleapis.com/v1/translateHtml";
@@ -91,10 +92,24 @@ async function handleTranslate(request: Request, env: Env, origin: string): Prom
     return json({ error: "invalid translate request" }, 400, origin);
   }
 
+  const clientUA = request.headers.get("User-Agent") || "";
+  const activeUA = clientUA.includes("Chrome") && !/Edg|OPR/.test(clientUA) ? clientUA : USER_AGENT;
+
+  const upstreamUrl = new URL(ENDPOINT);
+  const headers = new Headers({
+    "Content-Type": "application/json+protobuf",
+    "User-Agent": activeUA,
+  });
+
+  if (env.GOOGLE_TRANSLATE_API_KEY) {
+    upstreamUrl.searchParams.set("key", env.GOOGLE_TRANSLATE_API_KEY);
+    headers.set("X-Goog-Api-Key", env.GOOGLE_TRANSLATE_API_KEY);
+  }
+
   const upstreamBody = JSON.stringify([[[html], source, target], "te"]);
-  const upstreamResponse = await fetch(ENDPOINT, {
+  const upstreamResponse = await fetch(upstreamUrl.toString(), {
     method: "POST",
-    headers: { "Content-Type": "application/json+protobuf", "User-Agent": USER_AGENT },
+    headers,
     body: upstreamBody,
   });
   if (!upstreamResponse.ok) {
