@@ -1,0 +1,24 @@
+name = "nmt-relay"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+# 部署后地址取决于 Cloudflare 账号的 workers.dev 子域名设置：
+# 账号子域名若为 "montage"，本 Worker 最终地址即 nmt-relay.montage.workers.dev
+# 子域名在 Cloudflare Dashboard → Workers & Pages → 右上角设置一次性配置，非本文件控制。
+
+# 允许发起请求的静态站点 Origin，只到域名这一级，不含子路径
+# （subs.js.org 是 MontageSubs 组织已有的自定义域名，本仓库的 Pages 会
+# 自动落在 subs.js.org/nmt-subtitle-translator/ 下，Origin 仍是 subs.js.org 本身）
+[vars]
+ALLOWED_ORIGIN = "https://subs.js.org"
+RATE_LIMIT_PER_HOUR = "1000"
+
+# 按 IP 限流用的 KV 命名空间，先用 `npx wrangler kv namespace create RATE_LIMIT_KV`
+# 创建后，把返回的 id 填在下面。
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "replace-with-your-kv-namespace-id"
+
+# WORKER_PRIVATE_KEY 不写在本文件里，改用：
+#   npx wrangler secret put WORKER_PRIVATE_KEY
+# 粘贴 scripts/generate-keys.mjs 输出的私钥（base64 PKCS8 一整行）。
