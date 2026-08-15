@@ -11,9 +11,9 @@ const app = document.getElementById("app")!;
 app.innerHTML = `
   <main class="shell">
     <header class="shell__header">
-      <h1>NMT Subtitle Translator</h1>
-      <p class="brand-tag">字幕翻译工具 · MontageSubs</p>
-      <p class="muted">上传 SRT，浏览器本地拆分句子，经 Worker 转发翻译，结果同样在本地合并回字幕，全程不上传到任何第三方服务器（Worker 仅做无状态转发）。</p>
+      <h1>免费在线字幕翻译器</h1>
+      <p class="brand-tag">字幕翻译工具（内测中） · MontageSubs</p>
+      <p class="muted">本工具在 Google 神经翻译的基础上，通过优化模型推理逻辑，提升译文的连贯性与自然度，有效缓解机翻的生硬感。结合术语表机制保障专业词汇的翻译精准度，并针对字幕场景进行专项排版调优，确保标点规范且不丢行、不错位，旨在提供一个稳定、可控的字幕翻译方案。</p>
       <p class="muted" id="stats-line"></p>
     </header>
 
