@@ -92,8 +92,7 @@ async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext
   if (!text || !source || !target) return json({ error: "invalid translate request" }, 400, origin);
 
   const limit = maxBatchChars(env);
-  if (text.length > limit) return json({ error: "payload exceeds maxChars", maxChars: limit }, 413, origin);
-
+  
   const expected = computeAnswer(payload.nonce, text, deriveOps(payload.nonce));
   if (expected !== body.answer) return json({ error: "challenge mismatch" }, 403, origin);
 
