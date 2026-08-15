@@ -100,8 +100,12 @@ async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext
   const cleared = await verifyClearance(env.WORKER_SECRET, body.clearance);
   if (!cleared) {
     const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-    const { success } = await env.RATE_LIMITER.limit({ key: ip });
-    if (!success) return json({ error: "rate_limited", trigger_turnstile: true }, 429, origin);
+    try {
+      const { success } = await env.RATE_LIMITER.limit({ key: ip });
+      if (!success) return json({ error: "rate_limited", trigger_turnstile: true }, 429, origin);
+    } catch (e) {
+      console.error(`rate limiter unavailable, failing open: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   const headers = new Headers({ "Content-Type": "application/json+protobuf", "User-Agent": FALLBACK_USER_AGENT });
@@ -139,18 +143,23 @@ async function handleTurnstile(request: Request, env: Env, origin: string): Prom
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const origin = request.headers.get("Origin") || "";
-    const allowed = origin === env.ALLOWED_ORIGIN;
+    try {
+      const allowed = origin === env.ALLOWED_ORIGIN;
 
-    if (request.method === "OPTIONS") {
-      return allowed ? new Response(null, { status: 204, headers: corsHeaders(origin) }) : new Response(null, { status: 403 });
+      if (request.method === "OPTIONS") {
+        return allowed ? new Response(null, { status: 204, headers: corsHeaders(origin) }) : new Response(null, { status: 403 });
+      }
+      if (!allowed) return new Response(JSON.stringify({ error: "origin not allowed" }), { status: 403, headers: { "Content-Type": "application/json" } });
+      if (request.method !== "POST") return json({ error: "not found" }, 404, origin);
+      if (!env.WORKER_SECRET) return json({ error: "worker misconfigured: WORKER_SECRET is not set" }, 500, origin);
+
+      const path = new URL(request.url).pathname;
+      if (path === "/handshake") return await handleHandshake(request, env, ctx, origin);
+      if (path === "/translate") return await handleTranslate(request, env, ctx, origin);
+      if (path === "/turnstile") return await handleTurnstile(request, env, origin);
+      return json({ error: "not found" }, 404, origin);
+    } catch (e) {
+      return json({ error: `internal error: ${e instanceof Error ? e.message : String(e)}` }, 500, origin);
     }
-    if (!allowed) return new Response(JSON.stringify({ error: "origin not allowed" }), { status: 403, headers: { "Content-Type": "application/json" } });
-    if (request.method !== "POST") return json({ error: "not found" }, 404, origin);
-
-    const path = new URL(request.url).pathname;
-    if (path === "/handshake") return handleHandshake(request, env, ctx, origin);
-    if (path === "/translate") return handleTranslate(request, env, ctx, origin);
-    if (path === "/turnstile") return handleTurnstile(request, env, origin);
-    return json({ error: "not found" }, 404, origin);
   },
 };
