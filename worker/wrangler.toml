@@ -2,6 +2,9 @@ name = "nmt-relay"
 main = "src/index.ts"
 compatibility_date = "2024-11-01"
 
+[observability]
+enabled = true
+
 # 部署后地址取决于 Cloudflare 账号的 workers.dev 子域名设置：
 # 账号子域名若为 "montage"，本 Worker 最终地址即 nmt-relay.montage.workers.dev
 # 子域名在 Cloudflare Dashboard → Workers & Pages → 右上角设置一次性配置，非本文件控制。

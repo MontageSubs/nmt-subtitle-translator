@@ -73,11 +73,11 @@ function shuffledNames(rand: () => number, count: number): string[] {
 
 export function renderChallengeSource(seed: number, ops: Op[]): string {
   const rand = mulberry32(seed ^ 0x9e3779b9);
-  const [acc, i] = shuffledNames(rand, 2);
-  const junkLines = Array.from({ length: 2 + Math.floor(rand() * 3) }, () => {
-    const v = pick(rand, VAR_POOL);
-    return `let ${v}=${Math.floor(rand() * 1e6)};${v}=(${v}*${Math.floor(rand() * 97) + 1})>>>0;`;
-  }).join("");
+  const junkCount = 2 + Math.floor(rand() * 3);
+  const [acc, i, ...junkVars] = shuffledNames(rand, 2 + junkCount);
+  const junkLines = junkVars
+    .map((v) => `let ${v}=${Math.floor(rand() * 1e6)};${v}=(${v}*${Math.floor(rand() * 97) + 1})>>>0;`)
+    .join("");
   const opLines = ops.map((op) => opExpr(acc, op)).join(";");
   return [
     `let ${acc}=seed>>>0;`,
