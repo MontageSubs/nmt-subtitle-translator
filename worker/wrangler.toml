@@ -12,7 +12,7 @@ enabled = true
 # 允许发起请求的静态站点 Origin，只到域名这一级，不含子路径
 [vars]
 ALLOWED_ORIGIN = "https://subs.js.org"
-MAX_BATCH_CHARS = "60000"
+MAX_BATCH_CHARS = "8000"
 
 # Cloudflare 原生按 Key 限流绑定，不占用 KV 配额。
 # 当前 wrangler 对 Rate Limiting 绑定的配置语法请以 Cloudflare 最新文档为准，

@@ -1,7 +1,7 @@
 export const WORKER_URL: string = import.meta.env.VITE_WORKER_URL || "";
 export const TURNSTILE_SITE_KEY: string = import.meta.env.VITE_TURNSTILE_SITE_KEY || "";
 
-export const FALLBACK_MAX_CHARS = 60_000;
+export const FALLBACK_MAX_CHARS = 8_000;
 export const REQUEST_TIMEOUT_MS = 30_000;
 export const IDLE_STANDBY_MARGIN_MS = 2_000;
 
