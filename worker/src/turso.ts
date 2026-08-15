@@ -8,13 +8,18 @@ export interface Stats {
   last24h: number;
 }
 
+const SCHEMA_STATEMENTS: { sql: string; args?: number[] }[] = [
+  { sql: "CREATE TABLE IF NOT EXISTS translation_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, count INTEGER NOT NULL, created_at INTEGER NOT NULL)" },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_translation_stats_created_at ON translation_stats(created_at)" },
+];
+
 async function execute(config: TursoConfig, statements: { sql: string; args?: number[] }[]): Promise<any> {
   const response = await fetch(`${config.url}/v2/pipeline`, {
     method: "POST",
     headers: { Authorization: `Bearer ${config.authToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       requests: [
-        ...statements.map((stmt) => ({
+        ...[...SCHEMA_STATEMENTS, ...statements].map((stmt) => ({
           type: "execute",
           stmt: { sql: stmt.sql, args: (stmt.args || []).map((value) => ({ type: "integer", value: String(value) })) },
         })),
@@ -27,7 +32,7 @@ async function execute(config: TursoConfig, statements: { sql: string; args?: nu
 }
 
 function extractScalar(result: any, index: number): number {
-  const row = result?.results?.[index]?.response?.result?.rows?.[0]?.[0];
+  const row = result?.results?.[SCHEMA_STATEMENTS.length + index]?.response?.result?.rows?.[0]?.[0];
   return Number(row?.value ?? 0) || 0;
 }
 
