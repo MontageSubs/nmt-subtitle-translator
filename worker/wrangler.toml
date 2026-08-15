@@ -17,7 +17,7 @@ RATE_LIMIT_PER_HOUR = "1000"
 # 创建后，把返回的 id 填在下面。
 [[kv_namespaces]]
 binding = "RATE_LIMIT_KV"
-id = "replace-with-your-kv-namespace-id"
+id = "d4571e7c172c4b45b545d343d7ca8bb4"
 
 # WORKER_PRIVATE_KEY 不写在本文件里，改用：
 #   npx wrangler secret put WORKER_PRIVATE_KEY
