@@ -1,144 +1,156 @@
-export interface Env {
-  ALLOWED_ORIGIN: string;
-  WORKER_PRIVATE_KEY: string;
-  RATE_LIMIT_KV: KVNamespace;
-  RATE_LIMIT_PER_HOUR?: string;
-  GOOGLE_TRANSLATE_API_KEY?: string;
+import { issueSession, verifyToken } from "./token";
+import { computeAnswer, deriveOps } from "./challenge";
+import { verifyTurnstileToken, issueClearance, verifyClearance } from "./turnstile";
+import { recordSuccess, readStats, TursoConfig } from "./turso";
+
+export interface RateLimit {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
 }
 
-const ENDPOINT = "https://translate-pa.googleapis.com/v1/translateHtml";
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-const AUTH_WINDOW_MS = 60_000;
-const DEFAULT_RATE_LIMIT_PER_HOUR = 1000;
-const MAX_HTML_CHARS = 8000;
+export interface Env {
+  ALLOWED_ORIGIN: string;
+  WORKER_SECRET: string;
+  MAX_BATCH_CHARS?: string;
+  GOOGLE_TRANSLATE_API_KEY?: string;
+  TURSO_URL?: string;
+  TURSO_AUTH_TOKEN?: string;
+  TURNSTILE_SECRET_KEY?: string;
+  RATE_LIMITER: RateLimit;
+}
+
+const UPSTREAM_ENDPOINT = "https://translate-pa.googleapis.com/v1/translateHtml";
+const FALLBACK_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const STANDBY_TTL_MS = 60_000;
+const ACTIVE_TTL_MS = 10_000;
+const DEFAULT_MAX_BATCH_CHARS = 60_000;
+const MAX_PENDING_SUCCESS_PER_REQUEST = 500;
 
 function corsHeaders(origin: string): HeadersInit {
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-Auth",
-    "Vary": "Origin",
+    "Access-Control-Allow-Headers": "Content-Type",
+    Vary: "Origin",
   };
 }
 
 function json(body: unknown, status: number, origin: string): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-  });
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...corsHeaders(origin) } });
 }
 
-function base64ToBytes(base64: string): Uint8Array {
-  return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+function tursoConfig(env: Env): TursoConfig | null {
+  return env.TURSO_URL && env.TURSO_AUTH_TOKEN ? { url: env.TURSO_URL, authToken: env.TURSO_AUTH_TOKEN } : null;
 }
 
-let privateKeyPromise: Promise<CryptoKey> | null = null;
-
-function importPrivateKey(pkcs8Base64: string): Promise<CryptoKey> {
-  if (!privateKeyPromise) {
-    privateKeyPromise = crypto.subtle.importKey(
-      "pkcs8",
-      base64ToBytes(pkcs8Base64),
-      { name: "RSA-OAEP", hash: "SHA-256" },
-      false,
-      ["decrypt"]
-    );
-  }
-  return privateKeyPromise;
+function maxBatchChars(env: Env): number {
+  return Number(env.MAX_BATCH_CHARS) || DEFAULT_MAX_BATCH_CHARS;
 }
 
-async function verifyAuthHeader(env: Env, authHeader: string | null): Promise<boolean> {
-  if (!authHeader) return false;
+async function loadStats(env: Env) {
+  const config = tursoConfig(env);
+  if (!config) return { total: 0, last24h: 0 };
   try {
-    const key = await importPrivateKey(env.WORKER_PRIVATE_KEY);
-    const plaintext = await crypto.subtle.decrypt({ name: "RSA-OAEP" }, key, base64ToBytes(authHeader));
-    const { ts } = JSON.parse(new TextDecoder().decode(plaintext)) as { ts?: number };
-    const age = Date.now() - Number(ts);
-    return Number.isFinite(age) && age >= -5000 && age <= AUTH_WINDOW_MS;
+    return await readStats(config);
   } catch {
-    return false;
+    return { total: 0, last24h: 0 };
   }
 }
 
-async function checkRateLimit(env: Env, ip: string): Promise<boolean> {
-  const limit = Number(env.RATE_LIMIT_PER_HOUR) || DEFAULT_RATE_LIMIT_PER_HOUR;
-  const bucket = `rl:${ip}:${Math.floor(Date.now() / 3_600_000)}`;
-  const current = Number((await env.RATE_LIMIT_KV.get(bucket)) || "0");
-  if (current >= limit) return false;
-  await env.RATE_LIMIT_KV.put(bucket, String(current + 1), { expirationTtl: 3600 });
-  return true;
+function reportPending(ctx: ExecutionContext, env: Env, pendingSuccess: unknown): void {
+  const count = Math.floor(Number(pendingSuccess));
+  if (!Number.isFinite(count) || count <= 0 || count > MAX_PENDING_SUCCESS_PER_REQUEST) return;
+  const config = tursoConfig(env);
+  if (!config) return;
+  ctx.waitUntil(recordSuccess(config, count).catch(() => undefined));
 }
 
-async function handleTranslate(request: Request, env: Env, origin: string): Promise<Response> {
-  if (!(await verifyAuthHeader(env, request.headers.get("X-Auth")))) {
-    return json({ error: "missing or invalid auth" }, 401, origin);
+async function handleHandshake(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
+  const body = (await request.json().catch(() => ({}))) as { pendingSuccess?: number };
+  reportPending(ctx, env, body.pendingSuccess);
+  const [{ token, challenge, nonce }, stats] = await Promise.all([issueSession(env.WORKER_SECRET, STANDBY_TTL_MS), loadStats(env)]);
+  return json({ token, challenge, nonce, maxChars: maxBatchChars(env), stats }, 200, origin);
+}
+
+interface TranslateRequestBody {
+  token?: string;
+  answer?: number;
+  text?: string;
+  source?: string;
+  target?: string;
+  pendingSuccess?: number;
+  clearance?: string;
+}
+
+async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
+  const body = (await request.json().catch(() => null)) as TranslateRequestBody | null;
+  if (!body) return json({ error: "malformed JSON" }, 400, origin);
+
+  const payload = await verifyToken(env.WORKER_SECRET, body.token || "");
+  if (!payload) return json({ error: "invalid or expired token" }, 401, origin);
+
+  const { text, source, target } = body;
+  if (!text || !source || !target) return json({ error: "invalid translate request" }, 400, origin);
+
+  const limit = maxBatchChars(env);
+  if (text.length > limit) return json({ error: "payload exceeds maxChars", maxChars: limit }, 413, origin);
+
+  const expected = computeAnswer(payload.nonce, text, deriveOps(payload.nonce));
+  if (expected !== body.answer) return json({ error: "challenge mismatch" }, 403, origin);
+
+  const cleared = await verifyClearance(env.WORKER_SECRET, body.clearance);
+  if (!cleared) {
+    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+    const { success } = await env.RATE_LIMITER.limit({ key: ip });
+    if (!success) return json({ error: "rate_limited", trigger_turnstile: true }, 429, origin);
   }
 
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  if (!(await checkRateLimit(env, ip))) {
-    return json({ error: "rate limit exceeded" }, 429, origin);
-  }
-
-  const body = await request.text();
-  let payload: { html?: string; source?: string; target?: string };
-  try {
-    payload = JSON.parse(body);
-  } catch {
-    return json({ error: "malformed JSON" }, 400, origin);
-  }
-  const { html, source, target } = payload;
-  if (!html || !source || !target || html.length > MAX_HTML_CHARS) {
-    return json({ error: "invalid translate request" }, 400, origin);
-  }
-
-  const clientUA = request.headers.get("User-Agent") || "";
-  const activeUA = clientUA.includes("Chrome") && !/Edg|OPR/.test(clientUA) ? clientUA : USER_AGENT;
-
-  const upstreamUrl = new URL(ENDPOINT);
-  const headers = new Headers({
-    "Content-Type": "application/json+protobuf",
-    "User-Agent": activeUA,
-  });
-
+  const headers = new Headers({ "Content-Type": "application/json+protobuf", "User-Agent": FALLBACK_USER_AGENT });
+  const upstreamUrl = new URL(UPSTREAM_ENDPOINT);
   if (env.GOOGLE_TRANSLATE_API_KEY) {
     upstreamUrl.searchParams.set("key", env.GOOGLE_TRANSLATE_API_KEY);
     headers.set("X-Goog-Api-Key", env.GOOGLE_TRANSLATE_API_KEY);
   }
 
-  const upstreamBody = JSON.stringify([[[html], source, target], "te"]);
   const upstreamResponse = await fetch(upstreamUrl.toString(), {
-    method: "POST",
-    headers,
-    body: upstreamBody,
+    method: "POST", headers, body: JSON.stringify([[[text], source, target], "te"]),
   });
-  if (!upstreamResponse.ok) {
-    return json({ error: `upstream ${upstreamResponse.status}` }, 502, origin);
-  }
-  const upstreamPayload = (await upstreamResponse.json()) as unknown[];
-  const translatedHtml = (upstreamPayload as any)?.[0]?.[0];
-  if (typeof translatedHtml !== "string") {
-    return json({ error: "unexpected upstream response shape" }, 502, origin);
-  }
-  return json({ translatedHtml }, 200, origin);
+  if (!upstreamResponse.ok) return json({ error: `upstream ${upstreamResponse.status}` }, 502, origin);
+
+  const upstreamPayload = (await upstreamResponse.json().catch(() => null)) as unknown;
+  const translatedHtml = Array.isArray(upstreamPayload) ? (upstreamPayload as any)?.[0]?.[0] : undefined;
+  if (typeof translatedHtml !== "string") return json({ error: "unexpected upstream response shape" }, 502, origin);
+
+  reportPending(ctx, env, body.pendingSuccess);
+  const { token, challenge, nonce } = await issueSession(env.WORKER_SECRET, ACTIVE_TTL_MS);
+  return json({ translatedHtml, token, challenge, nonce, maxChars: limit }, 200, origin);
+}
+
+async function handleTurnstile(request: Request, env: Env, origin: string): Promise<Response> {
+  if (!env.TURNSTILE_SECRET_KEY) return json({ error: "turnstile not configured" }, 501, origin);
+  const body = (await request.json().catch(() => null)) as { turnstileToken?: string } | null;
+  if (!body?.turnstileToken) return json({ error: "missing turnstileToken" }, 400, origin);
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  const ok = await verifyTurnstileToken(env.TURNSTILE_SECRET_KEY, body.turnstileToken, ip);
+  if (!ok) return json({ error: "turnstile verification failed" }, 403, origin);
+  const clearance = await issueClearance(env.WORKER_SECRET);
+  return json({ clearance }, 200, origin);
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const origin = request.headers.get("Origin") || "";
     const allowed = origin === env.ALLOWED_ORIGIN;
 
     if (request.method === "OPTIONS") {
       return allowed ? new Response(null, { status: 204, headers: corsHeaders(origin) }) : new Response(null, { status: 403 });
     }
-    if (!allowed) {
-      return new Response(JSON.stringify({ error: "origin not allowed" }), { status: 403, headers: { "Content-Type": "application/json" } });
-    }
+    if (!allowed) return new Response(JSON.stringify({ error: "origin not allowed" }), { status: 403, headers: { "Content-Type": "application/json" } });
+    if (request.method !== "POST") return json({ error: "not found" }, 404, origin);
 
-    const url = new URL(request.url);
-    if (request.method === "POST" && url.pathname === "/translate") {
-      return handleTranslate(request, env, origin);
-    }
+    const path = new URL(request.url).pathname;
+    if (path === "/handshake") return handleHandshake(request, env, ctx, origin);
+    if (path === "/translate") return handleTranslate(request, env, ctx, origin);
+    if (path === "/turnstile") return handleTurnstile(request, env, origin);
     return json({ error: "not found" }, 404, origin);
   },
 };

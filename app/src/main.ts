@@ -4,7 +4,7 @@ import { translateUnits } from "./core/translateClient";
 import { merge } from "./core/bilingualMerge";
 import { SOURCE_LANGUAGES, TARGET_LANGUAGES, isChineseTarget } from "./core/languageProfiles";
 import { OutputMode } from "./core/types";
-import { DEFAULT_BATCH_CHARS, DEFAULT_CONCURRENCY } from "./config";
+import { handshake, bufferSuccess } from "./core/workerClient";
 
 const app = document.getElementById("app")!;
 
@@ -14,6 +14,7 @@ app.innerHTML = `
       <h1>NMT Subtitle Translator</h1>
       <p class="brand-tag">字幕翻译工具 · MontageSubs</p>
       <p class="muted">上传 SRT，浏览器本地拆分句子，经 Worker 转发翻译，结果同样在本地合并回字幕，全程不上传到任何第三方服务器（Worker 仅做无状态转发）。</p>
+      <p class="muted" id="stats-line"></p>
     </header>
 
     <section class="card">
@@ -58,6 +59,8 @@ app.innerHTML = `
       <p id="result-summary"></p>
       <a id="download-link" class="primary" download>下载字幕</a>
     </section>
+
+    <div id="turnstile-container" hidden></div>
   </main>
 `;
 
@@ -81,6 +84,7 @@ const logEl = document.getElementById("log") as HTMLElement;
 const resultCard = document.getElementById("result-card") as HTMLElement;
 const resultSummary = document.getElementById("result-summary") as HTMLElement;
 const downloadLink = document.getElementById("download-link") as HTMLAnchorElement;
+const statsLine = document.getElementById("stats-line") as HTMLElement;
 
 fillSelect(sourceSelect, SOURCE_LANGUAGES, "en");
 fillSelect(targetSelect, TARGET_LANGUAGES, "zh");
@@ -110,6 +114,14 @@ console.log = (...args: unknown[]) => {
 async function readFile(file: File): Promise<string> {
   return file.text();
 }
+
+handshake()
+  .then(({ total, last24h }) => {
+    statsLine.textContent = `累计翻译 ${total} 条字幕 · 近 24 小时 ${last24h} 条`;
+  })
+  .catch(() => {
+    statsLine.textContent = "";
+  });
 
 startButton.addEventListener("click", async () => {
   const srtFile = srtInput.files?.[0];
@@ -142,8 +154,6 @@ startButton.addEventListener("click", async () => {
     const { translations, skipped } = await translateUnits(
       extracted.units, extracted.chapters, extracted.cues, sourceLang, targetLang,
       {
-        batchChars: DEFAULT_BATCH_CHARS,
-        concurrency: DEFAULT_CONCURRENCY,
         onProgress: (event) => {
           const percent = event.total ? Math.round((event.completed / event.total) * 100) : 0;
           progressBar.value = percent;
@@ -163,6 +173,7 @@ startButton.addEventListener("click", async () => {
     resultSummary.textContent = `完成：共 ${extracted.cues.length} 条字幕，缺失翻译 ${result.missing_count} 条，近似拆分 ${result.approx_splits.length} 处，跳过 ${skipped.length} 个单元（详情见上方日志）。`;
     resultCard.hidden = false;
     progressLabel.textContent = "完成";
+    bufferSuccess();
   } catch (e) {
     appendLog(`错误：${e instanceof Error ? e.message : String(e)}`);
     progressLabel.textContent = "失败";

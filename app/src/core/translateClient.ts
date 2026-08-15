@@ -1,6 +1,5 @@
 import { Unit, Chapter, Cue, ProgressEvent } from "./types";
-import { postTranslateHtml } from "./workerClient";
-import { MAX_ATTEMPTS, RETRY_DELAY_MS, DEFAULT_CONCURRENCY } from "../config";
+import { postTranslateHtml, getMaxChars } from "./workerClient";
 
 const GROUP_MARKER_PATTERN = /\u27e6g([^\u27e6\u27e7]+)\u27e7/g;
 const groupMarker = (id: number | string) => `\u27e6g${id}\u27e7`;
@@ -146,12 +145,25 @@ function parseByMarkers(html: string): Map<number, string> {
   return result;
 }
 
-async function callWorker(batch: Item[][], sourceLang: string, targetLang: string): Promise<Map<string, string>> {
+async function sendHtml(html: string, sourceLang: string, targetLang: string): Promise<string> {
+  const { translatedHtml } = await postTranslateHtml(html, sourceLang, targetLang);
+  return translatedHtml;
+}
+
+async function sendBatch(batch: Item[][], sourceLang: string, targetLang: string): Promise<Map<string, string>> {
   const items = batch.flat();
   const indices = new Map(items.map((item, i) => [item.id, i + 1]));
   const idByIndex = new Map(Array.from(indices, ([id, i]) => [i, id]));
   const html = batch.map((group) => buildChapterHtml(group, indices)).join("");
-  const translatedHtml = await postTranslateHtml(html, sourceLang, targetLang);
+
+  let translatedHtml: string;
+  try {
+    translatedHtml = await sendHtml(html, sourceLang, targetLang);
+  } catch (e) {
+    log(`batch request failed: ${e}`);
+    return new Map();
+  }
+
   const parsed = parseByMarkers(translatedHtml);
   const sourceById = new Map(items.map((item) => [item.id, item.text]));
   const result = new Map<string, string>();
@@ -163,88 +175,50 @@ async function callWorker(batch: Item[][], sourceLang: string, targetLang: strin
   return result;
 }
 
+async function sendBatchesSequentially(
+  batches: Item[][][], sourceLang: string, targetLang: string,
+  onProgress?: (completed: number, total: number) => void
+): Promise<Map<string, string>> {
+  const translations = new Map<string, string>();
+  let completed = 0;
+  for (const batch of batches) {
+    for (const [id, text] of await sendBatch(batch, sourceLang, targetLang)) translations.set(id, text);
+    completed += 1;
+    onProgress?.(completed, batches.length);
+  }
+  return translations;
+}
+
 function cueRef(itemId: string): string {
   return itemId.split(":", 1)[0];
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function translateBatch(batch: Item[][], sourceLang: string, targetLang: string): Promise<{ result: Map<string, string>; missing: string[] }> {
-  const items = batch.flat();
-  const expectedIds = new Set(items.map((i) => i.id));
-  let result = new Map<string, string>();
-  let missing = new Set(expectedIds);
-
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      result = await callWorker(batch, sourceLang, targetLang);
-    } catch (e) {
-      log(`attempt ${attempt} failed: ${e}`);
-      result = new Map();
-    }
-    missing = new Set([...expectedIds].filter((id) => !result.has(id)));
-    if (!missing.size) return { result, missing: [] };
-
-    const missingCues = [...new Set([...missing].map(cueRef))].sort();
-    log(`attempt ${attempt}: missing ${missing.size} of ${items.length} units, cues: ${missingCues.join(", ")}`);
-    if (attempt < MAX_ATTEMPTS) await sleep(RETRY_DELAY_MS);
-  }
-
-  if (items.length > 1) {
-    const byId = new Map(items.map((i) => [i.id, i]));
-    const missingCues = [...new Set([...missing].map(cueRef))].sort();
-    log(`isolating ${missing.size} unit(s) still missing, cues: ${missingCues.join(", ")}`);
-    for (const uid of [...missing].sort()) {
-      const { result: soloResult } = await translateBatch([[byId.get(uid)!]], sourceLang, targetLang);
-      if (soloResult.has(uid)) result.set(uid, soloResult.get(uid)!);
-    }
-    missing = new Set([...expectedIds].filter((id) => !result.has(id)));
-  }
-  return { result, missing: [...missing].sort() };
-}
-
-async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T) => Promise<R>, onDone?: (result: R, index: number) => void): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let cursor = 0;
-  async function runner() {
-    while (cursor < items.length) {
-      const index = cursor++;
-      const result = await worker(items[index]);
-      results[index] = result;
-      onDone?.(result, index);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, runner));
-  return results;
-}
-
 async function translate(
-  items: Item[],
-  chapterGroups: string[][],
-  sourceLang: string,
-  targetLang: string,
-  batchChars: number,
-  concurrency: number,
-  onProgress?: (event: ProgressEvent) => void
+  items: Item[], chapterGroups: string[][], sourceLang: string, targetLang: string,
+  maxChars: number, onProgress?: (event: ProgressEvent) => void
 ): Promise<{ translations: Map<string, string>; skipped: string[] }> {
-  const translations = new Map<string, string>();
-  const skipped: string[] = [];
-  const { batches, oversized } = buildBatches(items, chapterGroups, batchChars);
-  for (const item of oversized) {
-    log(`unit ${item.id}: ${item.text.length} chars exceeds batch_chars (${batchChars}), cue-level content cannot be split further, skipping without truncation`);
-    skipped.push(item.id);
+  const { batches, oversized } = buildBatches(items, chapterGroups, maxChars);
+  for (const item of oversized) log(`unit ${item.id}: ${item.text.length} chars exceeds maxChars (${maxChars}), cue-level content cannot be split further, skipping without truncation`);
+
+  const translations = await sendBatchesSequentially(batches, sourceLang, targetLang, (completed, total) =>
+    onProgress?.({ stage: "translate", completed, total })
+  );
+
+  const oversizedIds = new Set(oversized.map((i) => i.id));
+  let missing = items.map((i) => i.id).filter((id) => !translations.has(id) && !oversizedIds.has(id));
+
+  if (missing.length) {
+    const missingCues = [...new Set(missing.map(cueRef))].sort();
+    log(`retry round: resending ${missing.length} missing unit(s) in one merged request, cues: ${missingCues.join(", ")}`);
+    const missingSet = new Set(missing);
+    const filteredGroups = chapterGroups.map((g) => g.filter((id) => missingSet.has(id))).filter((g) => g.length);
+    const filteredItems = items.filter((i) => missingSet.has(i.id));
+    const { batches: retryBatches } = buildBatches(filteredItems, filteredGroups, maxChars);
+    for (const [id, text] of await sendBatchesSequentially(retryBatches, sourceLang, targetLang)) translations.set(id, text);
+    missing = missing.filter((id) => !translations.has(id));
   }
 
-  let completed = 0;
-  await mapWithConcurrency(batches, concurrency, (batch) => translateBatch(batch, sourceLang, targetLang), ({ result, missing }) => {
-    for (const [id, text] of result) translations.set(id, text);
-    skipped.push(...missing);
-    completed += 1;
-    onProgress?.({ stage: "translate", completed, total: batches.length });
-  });
-  return { translations, skipped };
+  return { translations, skipped: [...oversized.map((i) => i.id), ...missing] };
 }
 
 function scriptOf(lang: string | undefined | null): string | undefined {
@@ -313,9 +287,7 @@ function flattenUnits(units: Unit[], chapterOfUnit: Map<number, number>) {
 
 function restorePlaceholders(text: string, mapping: Record<string, string>): string {
   let result = text;
-  for (const [placeholder, target] of Object.entries(mapping)) {
-    result = result.split(placeholder).join(target);
-  }
+  for (const [placeholder, target] of Object.entries(mapping)) result = result.split(placeholder).join(target);
   return result;
 }
 
@@ -332,12 +304,6 @@ function resolveTranslation(unit: Unit, translations: Map<string, string>, sourc
   return [null, null, null];
 }
 
-async function retrySingle(text: string, sourceLang: string, targetLang: string): Promise<string | undefined> {
-  if (!text || !text.trim()) return undefined;
-  const { result } = await translateBatch([[{ id: "retry", text }]], sourceLang, targetLang);
-  return result.get("retry");
-}
-
 function contentLength(text: string | null | undefined): number {
   return (text || "").match(/[\p{L}\p{N}_]/gu)?.length || 0;
 }
@@ -349,32 +315,73 @@ function isLengthPlausible(sourceText: string, translatedText: string): boolean 
   return ratio >= LENGTH_RATIO_MIN && ratio <= LENGTH_RATIO_MAX;
 }
 
-async function retryWindowed(units: Unit[], suspectId: number, sourceLang: string, targetLang: string, batchChars: number): Promise<Map<number, string>> {
+interface UntranslatedCandidate {
+  unit: Unit;
+  sourceText: string;
+  mapping: Record<string, string>;
+}
+
+async function retryUntranslated(
+  candidates: UntranslatedCandidate[], sourceLang: string, targetLang: string, maxChars: number
+): Promise<Map<number, string>> {
+  if (!candidates.length) return new Map();
+  const items = candidates.map((c) => ({ id: String(c.unit.id), text: c.sourceText }));
+  const { batches } = buildBatches(items, items.map((i) => [i.id]), maxChars);
+  const raw = await sendBatchesSequentially(batches, sourceLang, targetLang);
+  const recovered = new Map<number, string>();
+  for (const c of candidates) {
+    const text = raw.get(String(c.unit.id));
+    if (text !== undefined) recovered.set(c.unit.id, restorePlaceholders(text, c.mapping));
+  }
+  return recovered;
+}
+
+interface WindowPlan {
+  suspectId: number;
+  windowedText: string;
+  expectedIds: number[];
+  keepIds: Set<number>;
+  window: Unit[];
+}
+
+function buildWindowPlan(units: Unit[], suspectId: number, batchChars: number): WindowPlan | null {
   const index = new Map(units.map((u, i) => [u.id, i]));
   const i = index.get(suspectId)!;
   const window = units.slice(Math.max(0, i - WINDOW_CONTEXT_RADIUS), i + WINDOW_CONTEXT_RADIUS + 1);
-  if (window.length < 2) return new Map();
+  if (window.length < 2) return null;
   const pieces = [window[0].text];
-  for (const unit of window.slice(1)) {
-    pieces.push(` ${UNIT_MARKER_TEMPLATE(unit.id)} `, unit.text);
-  }
+  for (const unit of window.slice(1)) pieces.push(` ${UNIT_MARKER_TEMPLATE(unit.id)} `, unit.text);
   const windowedText = pieces.join("");
-  if (!withinBudget(windowedText, batchChars)) return new Map();
-
-  const { result } = await translateBatch([[{ id: "window", text: windowedText }]], sourceLang, targetLang);
-  const response = result.get("window");
-  if (response === undefined) return new Map();
-
+  if (!withinBudget(windowedText, batchChars)) return null;
   const expectedIds = window.slice(1).map((u) => u.id);
-  const foundIds = [...response.matchAll(UNIT_MARKER_PATTERN)].map((m) => Number(m[1]));
-  if (JSON.stringify(foundIds) !== JSON.stringify(expectedIds)) return new Map();
-
-  const chunks = response.split(UNIT_MARKER_PATTERN).filter((_, idx) => idx % 2 === 0);
   const keepIds = new Set(units.slice(Math.max(0, i - WINDOW_KEEP_RADIUS), i + WINDOW_KEEP_RADIUS + 1).map((u) => u.id));
+  return { suspectId, windowedText, expectedIds, keepIds, window };
+}
+
+function parseWindowResult(response: string | undefined, plan: WindowPlan): Map<number, string> {
+  if (response === undefined) return new Map();
+  const foundIds = [...response.matchAll(UNIT_MARKER_PATTERN)].map((m) => Number(m[1]));
+  if (JSON.stringify(foundIds) !== JSON.stringify(plan.expectedIds)) return new Map();
+  const chunks = response.split(UNIT_MARKER_PATTERN).filter((_, idx) => idx % 2 === 0);
   const recovered = new Map<number, string>();
-  window.forEach((unit, idx) => {
-    if (keepIds.has(unit.id)) recovered.set(unit.id, chunks[idx].trim());
+  plan.window.forEach((unit, idx) => {
+    if (plan.keepIds.has(unit.id)) recovered.set(unit.id, (chunks[idx] || "").trim());
   });
+  return recovered;
+}
+
+async function retryWindowedMerged(
+  units: Unit[], suspectIds: number[], sourceLang: string, targetLang: string, maxChars: number
+): Promise<Map<number, string>> {
+  const plans = suspectIds.map((id) => buildWindowPlan(units, id, maxChars)).filter((p): p is WindowPlan => p !== null);
+  if (!plans.length) return new Map();
+  const items = plans.map((p) => ({ id: String(p.suspectId), text: p.windowedText }));
+  const { batches } = buildBatches(items, items.map((i) => [i.id]), maxChars);
+  const raw = await sendBatchesSequentially(batches, sourceLang, targetLang);
+  const recovered = new Map<number, string>();
+  for (const plan of plans) {
+    for (const [uid, text] of parseWindowResult(raw.get(String(plan.suspectId)), plan)) recovered.set(uid, text);
+  }
   return recovered;
 }
 
@@ -413,46 +420,52 @@ function buildIsolatedDivs(cueIds: number[], cueTextById: Map<number, string>): 
     .join("");
 }
 
-async function retryIsolatedCues(
-  missingIds: number[], cueOrder: number[], cueTextById: Map<number, string>,
-  sourceLang: string, targetLang: string, batchChars: number
+async function retryIsolatedCuesMerged(
+  missingByUnit: Map<number, number[]>, cueOrder: number[], cueTextById: Map<number, string>,
+  sourceLang: string, targetLang: string, maxChars: number
 ): Promise<Map<number, string>> {
   const position = new Map(cueOrder.map((cid, i) => [cid, i]));
-  const positions = missingIds.map((cid) => position.get(cid)).filter((p): p is number => p !== undefined).sort((a, b) => a - b);
-  if (!positions.length) return new Map();
-  const lo = Math.max(0, positions[0] - ISOLATED_CUE_RADIUS);
-  const hi = Math.min(cueOrder.length - 1, positions[positions.length - 1] + ISOLATED_CUE_RADIUS);
-  const html = buildIsolatedDivs(cueOrder.slice(lo, hi + 1), cueTextById);
-  if (!withinBudget(html, batchChars)) return new Map();
+  const positions = new Set<number>();
+  for (const cueIds of missingByUnit.values()) {
+    for (const cid of cueIds) {
+      const p = position.get(cid);
+      if (p === undefined) continue;
+      for (let k = Math.max(0, p - ISOLATED_CUE_RADIUS); k <= Math.min(cueOrder.length - 1, p + ISOLATED_CUE_RADIUS); k++) positions.add(k);
+    }
+  }
+  if (!positions.size) return new Map();
+
+  const html = buildIsolatedDivs([...positions].sort((a, b) => a - b).map((p) => cueOrder[p]), cueTextById);
+  if (!withinBudget(html, maxChars)) return new Map();
 
   let translatedHtml: string;
   try {
-    translatedHtml = await postTranslateHtml(html, sourceLang, targetLang);
+    translatedHtml = await sendHtml(html, sourceLang, targetLang);
   } catch (e) {
     log(`isolated cue retry failed: ${e}`);
     return new Map();
   }
+
   const flat = unescapeHtml(translatedHtml.replace(TAG_PATTERN, ""));
   const recovered = splitCueChunks(flat);
-  const missingSet = new Set(missingIds);
+  const allMissing = new Set([...missingByUnit.values()].flat());
   const out = new Map<number, string>();
   for (const [cid, text] of recovered) {
-    if (missingSet.has(cid) && hasContent(text) && isLengthPlausible(cueTextById.get(cid) || "", text)) out.set(cid, text);
+    if (allMissing.has(cid) && hasContent(text) && isLengthPlausible(cueTextById.get(cid) || "", text)) out.set(cid, text);
   }
   return out;
 }
 
 export interface TranslateUnitsOptions {
-  batchChars: number;
-  concurrency?: number;
+  maxChars?: number;
   onProgress?: (event: ProgressEvent) => void;
 }
 
 export async function translateUnits(
   units: Unit[], chapters: Chapter[], cues: Cue[],
-  sourceLang: string, targetLang: string, options: TranslateUnitsOptions
+  sourceLang: string, targetLang: string, options: TranslateUnitsOptions = {}
 ): Promise<{ translations: Record<string, string>; skipped: (string | number)[] }> {
-  const concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
+  const maxChars = options.maxChars ?? getMaxChars();
   const resolved = new Map(units.filter((u) => u.resolved !== null).map((u) => [u.id, u.resolved as string]));
   const pending = units.filter((u) => u.resolved === null);
   const chapterOfUnit = new Map<number, number>();
@@ -460,23 +473,29 @@ export async function translateUnits(
 
   const { items, chapterGroups } = flattenUnits(pending, chapterOfUnit);
   const { translations: translationsRaw } = items.length
-    ? await translate(items, chapterGroups, sourceLang, targetLang, options.batchChars, concurrency, options.onProgress)
+    ? await translate(items, chapterGroups, sourceLang, targetLang, maxChars, options.onProgress)
     : { translations: new Map<string, string>() };
 
   const results = new Map<number, string | null>(resolved);
+  const untranslatedCandidates: UntranslatedCandidate[] = [];
   for (const unit of pending) {
-    let [finalText, sourceText, mapping] = resolveTranslation(unit, translationsRaw, sourceLang, targetLang);
+    const [finalText, sourceText, mapping] = resolveTranslation(unit, translationsRaw, sourceLang, targetLang);
+    results.set(unit.id, finalText);
     if (finalText !== null && isUntranslated(finalText, sourceLang, targetLang)) {
-      const retried = await retrySingle(sourceText || "", sourceLang, targetLang);
-      if (retried) {
-        const candidate = restorePlaceholders(retried, mapping || {});
-        if (candidate !== finalText) {
-          log(`unit ${unit.id}: retry changed result`);
-          finalText = candidate;
-        }
+      untranslatedCandidates.push({ unit, sourceText: sourceText || "", mapping: mapping || {} });
+    }
+  }
+
+  if (untranslatedCandidates.length) {
+    log(`untranslated-script retry: resending ${untranslatedCandidates.length} unit(s) in one merged request`);
+    const recovered = await retryUntranslated(untranslatedCandidates, sourceLang, targetLang, maxChars);
+    for (const { unit } of untranslatedCandidates) {
+      const candidate = recovered.get(unit.id);
+      if (candidate !== undefined && candidate !== results.get(unit.id)) {
+        log(`unit ${unit.id}: retry changed result`);
+        results.set(unit.id, candidate);
       }
     }
-    results.set(unit.id, finalText);
   }
 
   const unitById = new Map(units.map((u) => [u.id, u]));
@@ -488,27 +507,31 @@ export async function translateUnits(
   const cueSuspects = new Set(
     [...results.entries()].filter(([uid, text]) => text !== null && missingCueIds(unitById.get(uid)!, text).length > 0).map(([uid]) => uid)
   );
-  const cueOrder = cues.map((c) => c.id);
-  const cueTextById = new Map(cues.map((c) => [c.id, c.text]));
-
   const suspects = [...new Set([...lengthSuspects, ...cueSuspects])].sort((a, b) => a - b);
-  for (const uid of suspects) {
-    const recovered = await retryWindowed(units, uid, sourceLang, targetLang, options.batchChars);
-    if (recovered.size) {
-      log(`windowed retry around unit ${uid}: recovered ${[...recovered.keys()].sort((a, b) => a - b)}`);
-      for (const [rid, text] of recovered) results.set(rid, text);
-    } else {
-      log(`windowed retry around unit ${uid}: markers did not align, left as-is`);
+
+  if (suspects.length) {
+    log(`windowed retry: resending context around ${suspects.length} suspect unit(s) in one merged request`);
+    const recovered = await retryWindowedMerged(units, suspects, sourceLang, targetLang, maxChars);
+    for (const [uid, text] of recovered) results.set(uid, text);
+
+    const cueOrder = cues.map((c) => c.id);
+    const cueTextById = new Map(cues.map((c) => [c.id, c.text]));
+    const missingByUnit = new Map<number, number[]>();
+    for (const uid of suspects) {
+      const remaining = missingCueIds(unitById.get(uid)!, results.get(uid));
+      if (remaining.length) missingByUnit.set(uid, remaining);
     }
 
-    const remaining = missingCueIds(unitById.get(uid)!, results.get(uid));
-    if (!remaining.length) continue;
-    const recoveredCues = await retryIsolatedCues(remaining, cueOrder, cueTextById, sourceLang, targetLang, options.batchChars);
-    if (recoveredCues.size) {
-      results.set(uid, patchMissingCues(results.get(uid) as string, expectedCueIds(unitById.get(uid)!), recoveredCues));
-      log(`isolated cue retry for unit ${uid}: recovered cues ${[...recoveredCues.keys()].sort((a, b) => a - b)}`);
-    } else {
-      log(`isolated cue retry for unit ${uid}: cues ${remaining} still missing, left as-is`);
+    if (missingByUnit.size) {
+      log(`isolated cue retry: resending cues for ${missingByUnit.size} unit(s) in one merged request`);
+      const recoveredCues = await retryIsolatedCuesMerged(missingByUnit, cueOrder, cueTextById, sourceLang, targetLang, maxChars);
+      for (const [uid, cueIds] of missingByUnit) {
+        const unitRecovered = new Map([...recoveredCues].filter(([cid]) => cueIds.includes(cid)));
+        if (unitRecovered.size) {
+          results.set(uid, patchMissingCues(results.get(uid) as string, expectedCueIds(unitById.get(uid)!), unitRecovered));
+          log(`isolated cue retry: unit ${uid} recovered cues ${[...unitRecovered.keys()].sort((a, b) => a - b)}`);
+        }
+      }
     }
   }
 

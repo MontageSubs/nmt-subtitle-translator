@@ -7,18 +7,22 @@ compatibility_date = "2024-11-01"
 # 子域名在 Cloudflare Dashboard → Workers & Pages → 右上角设置一次性配置，非本文件控制。
 
 # 允许发起请求的静态站点 Origin，只到域名这一级，不含子路径
-# （subs.js.org 是 MontageSubs 组织已有的自定义域名，本仓库的 Pages 会
-# 自动落在 subs.js.org/nmt-subtitle-translator/ 下，Origin 仍是 subs.js.org 本身）
 [vars]
 ALLOWED_ORIGIN = "https://subs.js.org"
-RATE_LIMIT_PER_HOUR = "1000"
+MAX_BATCH_CHARS = "60000"
 
-# 按 IP 限流用的 KV 命名空间，先用 `npx wrangler kv namespace create RATE_LIMIT_KV`
-# 创建后，把返回的 id 填在下面。
-[[kv_namespaces]]
-binding = "RATE_LIMIT_KV"
-id = "d4571e7c172c4b45b545d343d7ca8bb4"
+# Cloudflare 原生按 Key 限流绑定，不占用 KV 配额。
+# 当前 wrangler 对 Rate Limiting 绑定的配置语法请以 Cloudflare 最新文档为准，
+# 下方写法基于 unsafe.bindings 通用挂载方式，部署前请核对一次。
+[[unsafe.bindings]]
+name = "RATE_LIMITER"
+type = "ratelimit"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
 
-# WORKER_PRIVATE_KEY 不写在本文件里，改用：
-#   npx wrangler secret put WORKER_PRIVATE_KEY
-# 粘贴 scripts/generate-keys.mjs 输出的私钥（base64 PKCS8 一整行）。
+# 以下均通过 `npx wrangler secret put <NAME>` 单独写入，不进本文件：
+#   WORKER_SECRET          HMAC签名密钥，任意长随机字符串，自行生成保管
+#   TURSO_URL               形如 https://<db>-<org>.turso.io
+#   TURSO_AUTH_TOKEN         Turso 数据库鉴权 token
+#   TURNSTILE_SECRET_KEY     Cloudflare Turnstile 后台密钥
+#   GOOGLE_TRANSLATE_API_KEY 可选，未设置时走匿名上游端点

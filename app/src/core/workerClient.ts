@@ -1,65 +1,172 @@
-import { WORKER_URL, WORKER_PUBLIC_KEY, REQUEST_TIMEOUT_MS, assertConfigured } from "../config";
+import { WORKER_URL, TURNSTILE_SITE_KEY, FALLBACK_MAX_CHARS, REQUEST_TIMEOUT_MS, IDLE_STANDBY_MARGIN_MS, assertConfigured } from "../config";
 
-let keyPromise: Promise<CryptoKey> | null = null;
+const PENDING_SUCCESS_KEY = "nmt_pending_success";
+const STANDBY_TTL_MS = 60_000;
+const ACTIVE_TTL_MS = 10_000;
 
-function base64ToBytes(base64: string): ArrayBuffer {
-  return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)).buffer as ArrayBuffer;
+export interface Stats {
+  total: number;
+  last24h: number;
 }
 
-function bytesToBase64(bytes: ArrayBuffer): string {
-  return btoa(String.fromCharCode(...new Uint8Array(bytes)));
-}
-
-function importPublicKey(): Promise<CryptoKey> {
-  if (!keyPromise) {
-    keyPromise = crypto.subtle.importKey(
-      "spki",
-      base64ToBytes(WORKER_PUBLIC_KEY),
-      { name: "RSA-OAEP", hash: "SHA-256" },
-      false,
-      ["encrypt"]
-    );
-  }
-  return keyPromise;
-}
-
-async function encryptedAuthHeader(): Promise<string> {
-  const key = await importPublicKey();
-  const plaintext = new TextEncoder().encode(JSON.stringify({ ts: Date.now() }));
-  const ciphertext = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, key, plaintext);
-  return bytesToBase64(ciphertext);
+interface Session {
+  token: string;
+  challenge: string;
+  nonce: number;
+  maxChars: number;
+  issuedAt: number;
+  ttl: number;
 }
 
 export class WorkerRequestError extends Error {
-  constructor(message: string, public readonly retryable: boolean) {
+  constructor(message: string, public readonly retryable: boolean, public readonly triggerTurnstile = false) {
     super(message);
   }
 }
 
-export async function postTranslateHtml(html: string, sourceLang: string, targetLang: string): Promise<string> {
+let session: Session | null = null;
+let clearance: string | null = null;
+
+declare global {
+  interface Window {
+    turnstile?: { render: (el: HTMLElement, opts: Record<string, unknown>) => string };
+  }
+}
+
+function readPendingSuccess(): number {
+  return Number(localStorage.getItem(PENDING_SUCCESS_KEY) || 0) || 0;
+}
+
+export function bufferSuccess(): void {
+  localStorage.setItem(PENDING_SUCCESS_KEY, String(readPendingSuccess() + 1));
+}
+
+function clearPendingSuccess(): void {
+  localStorage.removeItem(PENDING_SUCCESS_KEY);
+}
+
+async function request(path: string, body: unknown): Promise<any> {
   assertConfigured();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(`${WORKER_URL}/translate`, {
+    const response = await fetch(`${WORKER_URL}${path}`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Auth": await encryptedAuthHeader(),
-      },
-      body: JSON.stringify({ html, source: sourceLang, target: targetLang }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
+    const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const retryable = response.status === 429 || response.status >= 500;
-      throw new WorkerRequestError(`worker responded ${response.status}`, retryable);
+      throw new WorkerRequestError(payload?.error || `worker responded ${response.status}`, retryable, Boolean(payload?.trigger_turnstile));
     }
-    const payload = await response.json();
-    if (typeof payload.translatedHtml !== "string") {
-      throw new WorkerRequestError("worker response missing translatedHtml", false);
-    }
-    return payload.translatedHtml;
+    return payload;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+function isSessionFresh(candidate: Session | null): boolean {
+  if (!candidate) return false;
+  return Date.now() - candidate.issuedAt < candidate.ttl - IDLE_STANDBY_MARGIN_MS;
+}
+
+function adoptSession(payload: { token: string; challenge: string; nonce: number; maxChars?: number }, ttl: number): void {
+  session = {
+    token: payload.token,
+    challenge: payload.challenge,
+    nonce: payload.nonce,
+    maxChars: payload.maxChars || session?.maxChars || FALLBACK_MAX_CHARS,
+    issuedAt: Date.now(),
+    ttl,
+  };
+}
+
+export async function handshake(): Promise<Stats & { maxChars: number }> {
+  const pending = readPendingSuccess();
+  const payload = await request("/handshake", pending ? { pendingSuccess: pending } : {});
+  if (pending) clearPendingSuccess();
+  adoptSession(payload, STANDBY_TTL_MS);
+  return { total: payload.stats?.total ?? 0, last24h: payload.stats?.last24h ?? 0, maxChars: payload.maxChars || FALLBACK_MAX_CHARS };
+}
+
+async function ensureSession(): Promise<Session> {
+  if (!isSessionFresh(session)) await handshake();
+  return session!;
+}
+
+export function getMaxChars(): number {
+  return session?.maxChars || FALLBACK_MAX_CHARS;
+}
+
+function computeAnswer(challenge: string, seed: number, text: string): number {
+  return new Function("seed", "text", challenge)(seed, text) as number;
+}
+
+let turnstileLoad: Promise<void> | null = null;
+
+function loadTurnstileScript(): Promise<void> {
+  if (window.turnstile) return Promise.resolve();
+  if (!turnstileLoad) {
+    turnstileLoad = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js";
+      script.async = true;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("turnstile script failed to load"));
+      document.head.appendChild(script);
+    });
+  }
+  return turnstileLoad;
+}
+
+async function resolveTurnstile(): Promise<void> {
+  if (!TURNSTILE_SITE_KEY) throw new WorkerRequestError("触发限流，但未配置 Turnstile site key", false);
+  await loadTurnstileScript();
+  const container = document.getElementById("turnstile-container");
+  if (!container) throw new WorkerRequestError("触发限流，但页面缺少 #turnstile-container", false);
+
+  container.hidden = false;
+  const turnstileToken = await new Promise<string>((resolve, reject) => {
+    window.turnstile!.render(container, {
+      sitekey: TURNSTILE_SITE_KEY,
+      callback: (token: string) => resolve(token),
+      "error-callback": () => reject(new Error("turnstile challenge failed")),
+    });
+  });
+  container.hidden = true;
+
+  const payload = await request("/turnstile", { turnstileToken });
+  clearance = payload.clearance;
+}
+
+async function attemptTranslate(text: string, source: string, target: string): Promise<{ translatedHtml: string; maxChars: number }> {
+  const active = await ensureSession();
+  const answer = computeAnswer(active.challenge, active.nonce, text);
+  const pending = readPendingSuccess();
+  const payload = await request("/translate", {
+    token: active.token,
+    answer,
+    text,
+    source,
+    target,
+    ...(pending ? { pendingSuccess: pending } : {}),
+    ...(clearance ? { clearance } : {}),
+  });
+  if (pending) clearPendingSuccess();
+  adoptSession(payload, ACTIVE_TTL_MS);
+  return { translatedHtml: payload.translatedHtml, maxChars: payload.maxChars || active.maxChars };
+}
+
+export async function postTranslateHtml(text: string, source: string, target: string): Promise<{ translatedHtml: string; maxChars: number }> {
+  try {
+    return await attemptTranslate(text, source, target);
+  } catch (e) {
+    if (e instanceof WorkerRequestError && e.triggerTurnstile) {
+      await resolveTurnstile();
+      return attemptTranslate(text, source, target);
+    }
+    throw e;
   }
 }
