@@ -85,6 +85,10 @@ interface TranslateRequestBody {
   devtoolsProof?: number;
 }
 
+function logGate(event: string, ip: string, extra?: Record<string, unknown>): void {
+  console.log(JSON.stringify({ event, ip, ts: Date.now(), ...extra }));
+}
+
 async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
   const body = (await request.json().catch(() => null)) as TranslateRequestBody | null;
   if (!body) return json({ error: "malformed JSON" }, 400, origin);
@@ -102,16 +106,23 @@ async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext
   const expected = await computeAnswer(keyBytes, payload.nonce, text);
   if (expected !== body.answer) return json({ error: "challenge mismatch" }, 403, origin);
 
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
   const cleared = await verifyClearance(env.WORKER_SECRET, body.clearance);
   if (!cleared) {
-    if (body.envScore !== PROBE_EXPECTED_SCORE) return json({ error: "environment check failed", trigger_turnstile: true }, 429, origin);
+    if (body.envScore !== PROBE_EXPECTED_SCORE) {
+      logGate("turnstile_triggered", ip, { reason: "env_check_failed", envScore: body.envScore });
+      return json({ error: "environment check failed", trigger_turnstile: true }, 429, origin);
+    }
     if (body.devtoolsProof !== undefined && body.devtoolsProof === (await computeDevtoolsProof(keyBytes, payload.nonce))) {
+      logGate("turnstile_triggered", ip, { reason: "devtools_detected" });
       return json({ error: "devtools detected", trigger_turnstile: true }, 429, origin);
     }
-    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
     try {
       const { success } = await env.RATE_LIMITER.limit({ key: ip });
-      if (!success) return json({ error: "rate_limited", trigger_turnstile: true }, 429, origin);
+      if (!success) {
+        logGate("turnstile_triggered", ip, { reason: "rate_limited" });
+        return json({ error: "rate_limited", trigger_turnstile: true }, 429, origin);
+      }
     } catch (e) {
       console.error(`rate limiter unavailable, failing open: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -144,13 +155,17 @@ async function handleTurnstile(request: Request, env: Env, origin: string): Prom
   if (!body?.turnstileToken) return json({ error: "missing turnstileToken" }, 400, origin);
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
   const ok = await verifyTurnstileToken(env.TURNSTILE_SECRET_KEY, body.turnstileToken, ip);
-  if (!ok) return json({ error: "turnstile verification failed" }, 403, origin);
+  if (!ok) {
+    logGate("turnstile_verify_failed", ip);
+    return json({ error: "turnstile verification failed" }, 403, origin);
+  }
   const clearance = await issueClearance(env.WORKER_SECRET);
   return json({ clearance }, 200, origin);
 }
 
-function handleDevtoolsSignal(origin: string): Response {
-  console.log(JSON.stringify({ event: "devtools_signal", ts: Date.now() }));
+function handleDevtoolsSignal(request: Request, origin: string): Response {
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  logGate("devtools_signal", ip);
   return new Response(null, { status: 204, headers: corsHeaders(origin) });
 }
 
@@ -171,7 +186,7 @@ export default {
       if (path === "/handshake") return await handleHandshake(request, env, ctx, origin);
       if (path === "/translate") return await handleTranslate(request, env, ctx, origin);
       if (path === "/turnstile") return await handleTurnstile(request, env, origin);
-      if (path === "/devtools-signal") return handleDevtoolsSignal(origin);
+      if (path === "/devtools-signal") return handleDevtoolsSignal(request, origin);
       return json({ error: "not found" }, 404, origin);
     } catch (e) {
       return json({ error: `internal error: ${e instanceof Error ? e.message : String(e)}` }, 500, origin);
