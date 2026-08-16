@@ -13,8 +13,12 @@ const SCHEMA_STATEMENTS: { sql: string; args?: number[] }[] = [
   { sql: "CREATE INDEX IF NOT EXISTS idx_translation_stats_created_at ON translation_stats(created_at)" },
 ];
 
+function pipelineUrl(rawUrl: string): string {
+  return `${rawUrl.trim().replace(/^libsql:\/\//, "https://").replace(/\/+$/, "")}/v2/pipeline`;
+}
+
 async function execute(config: TursoConfig, statements: { sql: string; args?: number[] }[]): Promise<any> {
-  const response = await fetch(`${config.url}/v2/pipeline`, {
+  const response = await fetch(pipelineUrl(config.url), {
     method: "POST",
     headers: { Authorization: `Bearer ${config.authToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -27,7 +31,10 @@ async function execute(config: TursoConfig, statements: { sql: string; args?: nu
       ],
     }),
   });
-  if (!response.ok) throw new Error(`turso responded ${response.status}`);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`turso responded ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+  }
   return response.json();
 }
 
