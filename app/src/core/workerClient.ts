@@ -1,4 +1,6 @@
 import { WORKER_URL, TURNSTILE_SITE_KEY, FALLBACK_MAX_CHARS, REQUEST_TIMEOUT_MS, IDLE_STANDBY_MARGIN_MS, assertConfigured } from "../config";
+import { computeEnvScore } from "./envProbe";
+import { wasDevtoolsDetected } from "./devtoolsDetect";
 
 const PENDING_SUCCESS_KEY = "nmt_pending_success";
 const STANDBY_TTL_MS = 60_000;
@@ -11,7 +13,7 @@ export interface Stats {
 
 interface Session {
   token: string;
-  challenge: string;
+  challengeKey: string;
   nonce: number;
   maxChars: number;
   issuedAt: number;
@@ -72,10 +74,10 @@ function isSessionFresh(candidate: Session | null): boolean {
   return Date.now() - candidate.issuedAt < candidate.ttl - IDLE_STANDBY_MARGIN_MS;
 }
 
-function adoptSession(payload: { token: string; challenge: string; nonce: number; maxChars?: number }, ttl: number): void {
+function adoptSession(payload: { token: string; challengeKey: string; nonce: number; maxChars?: number }, ttl: number): void {
   session = {
     token: payload.token,
-    challenge: payload.challenge,
+    challengeKey: payload.challengeKey,
     nonce: payload.nonce,
     maxChars: payload.maxChars || session?.maxChars || FALLBACK_MAX_CHARS,
     issuedAt: Date.now(),
@@ -100,8 +102,25 @@ export function getMaxChars(): number {
   return session?.maxChars || FALLBACK_MAX_CHARS;
 }
 
-function computeAnswer(challenge: string, seed: number, text: string): number {
-  return new Function("seed", "text", challenge)(seed, text) as number;
+function decodeBase64Url(value: string): Uint8Array {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0));
+}
+
+async function signChallenge(challengeKey: string, message: string): Promise<number> {
+  const key = await crypto.subtle.importKey(
+    "raw", decodeBase64Url(challengeKey) as BufferSource, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  return new DataView(signature).getUint32(0) % 1_000_000;
+}
+
+function computeAnswer(challengeKey: string, nonce: number, text: string): Promise<number> {
+  return signChallenge(challengeKey, `${nonce}:${text}`);
+}
+
+function computeDevtoolsProof(challengeKey: string, nonce: number): Promise<number> {
+  return signChallenge(challengeKey, `devtools:${nonce}`);
 }
 
 let turnstileLoad: Promise<void> | null = null;
@@ -143,11 +162,15 @@ async function resolveTurnstile(): Promise<void> {
 
 async function attemptTranslate(text: string, source: string, target: string): Promise<{ translatedHtml: string; maxChars: number }> {
   const active = await ensureSession();
-  const answer = computeAnswer(active.challenge, active.nonce, text);
+  const answer = await computeAnswer(active.challengeKey, active.nonce, text);
+  const envScore = computeEnvScore(active.nonce);
+  const devtoolsProof = wasDevtoolsDetected() ? await computeDevtoolsProof(active.challengeKey, active.nonce) : undefined;
   const pending = readPendingSuccess();
   const payload = await request("/translate", {
     token: active.token,
     answer,
+    envScore,
+    ...(devtoolsProof !== undefined ? { devtoolsProof } : {}),
     text,
     source,
     target,

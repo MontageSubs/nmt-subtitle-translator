@@ -1,9 +1,33 @@
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
+import obfuscator from "javascript-obfuscator";
+
+const ENV_PROBE_CHUNK = "env-probe";
+
+function obfuscateEnvProbe() {
+  return {
+    name: "obfuscate-env-probe",
+    generateBundle(_options: unknown, bundle: Record<string, { type: string; fileName: string; code?: string }>) {
+      for (const file of Object.values(bundle)) {
+        if (file.type === "chunk" && file.fileName.includes(ENV_PROBE_CHUNK) && file.code) {
+          file.code = obfuscator.obfuscate(file.code, {
+            compact: true,
+            controlFlowFlattening: true,
+            deadCodeInjection: true,
+            stringArray: true,
+            stringArrayEncoding: ["base64"],
+            renameGlobals: false,
+          }).getObfuscatedCode();
+        }
+      }
+    },
+  };
+}
 
 export default defineConfig(({ mode }) => ({
   base: process.env.VITE_BASE_PATH || "/",
   plugins: [
+    ...(mode === "production" ? [obfuscateEnvProbe()] : []),
     VitePWA({
       registerType: "autoUpdate",
       includeAssets: ["favicon.svg", "icons/icon-192.png", "icons/icon-512.png"],
@@ -28,5 +52,15 @@ export default defineConfig(({ mode }) => ({
     }),
   ],
   worker: { format: "es" },
-  build: { target: "es2022", sourcemap: mode !== "production" },
+  build: {
+    target: "es2022",
+    sourcemap: mode !== "production",
+    rollupOptions: {
+      output: {
+        manualChunks(id: string) {
+          if (id.includes("core/envProbe") || id.includes("core/devtoolsDetect")) return ENV_PROBE_CHUNK;
+        },
+      },
+    },
+  },
 }));

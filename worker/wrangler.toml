@@ -23,9 +23,14 @@ type = "ratelimit"
 namespace_id = "1001"
 simple = { limit = 30, period = 60 }
 
-# 以下均通过 `npx wrangler secret put <NAME>` 单独写入，不进本文件：
+# 以下均通过 GitHub 仓库 Settings → Secrets and variables → Actions → Secrets 配置，
+# 由 deploy-worker.yml 在每次部署时自动 `wrangler secret put` 下发，不写入本文件：
 #   WORKER_SECRET          HMAC签名密钥，任意长随机字符串，自行生成保管
 #   TURSO_URL               形如 https://<db>-<org>.turso.io
 #   TURSO_AUTH_TOKEN         Turso 数据库鉴权 token
 #   TURNSTILE_SECRET_KEY     Cloudflare Turnstile 后台密钥
 #   GOOGLE_TRANSLATE_API_KEY 可选，未设置时走匿名上游端点
+# 另需配置 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID（Secrets）供 wrangler 鉴权。
+#
+# Turnstile site key（公开信息，非敏感）配置在 GitHub 仓库 Variables：
+#   TURNSTILE_SITE_KEY，构建时注入前端为 VITE_TURNSTILE_SITE_KEY（见 deploy-pages.yml）

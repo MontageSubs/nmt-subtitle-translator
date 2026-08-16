@@ -5,6 +5,9 @@ import { merge } from "./core/bilingualMerge";
 import { SOURCE_LANGUAGES, TARGET_LANGUAGES, isChineseTarget } from "./core/languageProfiles";
 import { OutputMode } from "./core/types";
 import { handshake, bufferSuccess } from "./core/workerClient";
+import { startDevtoolsWatch } from "./core/devtoolsDetect";
+
+const SUCCESS_COMPLETION_THRESHOLD = 0.95;
 
 const app = document.getElementById("app")!;
 
@@ -123,6 +126,8 @@ handshake()
     statsLine.textContent = "";
   });
 
+startDevtoolsWatch();
+
 startButton.addEventListener("click", async () => {
   const srtFile = srtInput.files?.[0];
   if (!srtFile) return;
@@ -173,7 +178,11 @@ startButton.addEventListener("click", async () => {
     resultSummary.textContent = `完成：共 ${extracted.cues.length} 条字幕，缺失翻译 ${result.missing_count} 条，近似拆分 ${result.approx_splits.length} 处，跳过 ${skipped.length} 个单元（详情见上方日志）。`;
     resultCard.hidden = false;
     progressLabel.textContent = "完成";
-    bufferSuccess();
+
+    const completionRatio = extracted.cues.length ? (extracted.cues.length - result.missing_count) / extracted.cues.length : 0;
+    if (completionRatio >= SUCCESS_COMPLETION_THRESHOLD) {
+      downloadLink.addEventListener("click", () => bufferSuccess(), { once: true });
+    }
   } catch (e) {
     appendLog(`错误：${e instanceof Error ? e.message : String(e)}`);
     progressLabel.textContent = "失败";

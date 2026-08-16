@@ -15,6 +15,24 @@ const EMBED_RATIO_THRESHOLD = 0.3;
 const TERM_PLACEHOLDER_TEMPLATE = (idx: number) => `\u27e6T${String(idx).padStart(2, "0")}\u27e7`;
 const VARIANT_PRIORITY = ["embedded", "placeholder", "plain"] as const;
 
+const BATCH_PACK_RATIO = 0.9;
+const INDEX_DIGITS_ESTIMATE = 4;
+const SPAN_MARKUP_OVERHEAD = "<span id=></span>".length + INDEX_DIGITS_ESTIMATE + groupMarker("0".repeat(INDEX_DIGITS_ESTIMATE)).length;
+const CHAPTER_WRAPPER_OVERHEAD = "<div></div>".length;
+
+function escapedLength(text: string): number {
+  let extra = 0;
+  for (const ch of text) {
+    if (ch === "&") extra += 4;
+    else if (ch === "<" || ch === ">") extra += 3;
+  }
+  return text.length + extra;
+}
+
+function itemMarkupChars(item: Item): number {
+  return SPAN_MARKUP_OVERHEAD + escapedLength(item.text);
+}
+
 const WINDOW_CONTEXT_RADIUS = 20;
 const WINDOW_KEEP_RADIUS = 2;
 const ISOLATED_CUE_RADIUS = 5;
@@ -69,29 +87,21 @@ interface Item {
   text: string;
 }
 
-function estimateItemPayloadChars(text: string): number {
-  return 35 + escapeHtml(text).length;
-}
-
-function estimateGroupPayloadChars(items: Item[]): number {
-  return 11 + items.reduce((s, i) => s + estimateItemPayloadChars(i.text), 0);
-}
-
 function splitOversizedChapter(items: Item[], batchChars: number) {
   const pieces: Item[][] = [];
   const oversized: Item[] = [];
   let piece: Item[] = [];
-  let pieceChars = 11;
+  let pieceChars = CHAPTER_WRAPPER_OVERHEAD;
   for (const item of items) {
-    const itemChars = estimateItemPayloadChars(item.text);
-    if (11 + itemChars > batchChars) {
+    const itemChars = itemMarkupChars(item);
+    if (itemChars > batchChars) {
       oversized.push(item);
       continue;
     }
     if (piece.length && pieceChars + itemChars > batchChars) {
       pieces.push(piece);
       piece = [];
-      pieceChars = 11;
+      pieceChars = CHAPTER_WRAPPER_OVERHEAD;
     }
     piece.push(item);
     pieceChars += itemChars;
@@ -114,7 +124,7 @@ function buildBatches(items: Item[], chapterGroups: string[][], batchChars: numb
   for (const group of chapterGroups) {
     const groupItems = group.map((id) => byId.get(id)).filter((x): x is Item => Boolean(x));
     if (!groupItems.length) continue;
-    const groupChars = estimateGroupPayloadChars(groupItems);
+    const groupChars = CHAPTER_WRAPPER_OVERHEAD + groupItems.reduce((s, i) => s + itemMarkupChars(i), 0);
     if (groupChars > batchChars) {
       flush();
       const { pieces, oversized: groupOversized } = splitOversizedChapter(groupItems, batchChars);
@@ -132,6 +142,7 @@ function buildBatches(items: Item[], chapterGroups: string[][], batchChars: numb
   flush();
   return { batches, oversized };
 }
+
 function buildChapterHtml(group: Item[], indices: Map<string, number>): string {
   const spans = group
     .map((item) => {
@@ -157,16 +168,11 @@ async function sendHtml(html: string, sourceLang: string, targetLang: string): P
   return translatedHtml;
 }
 
-async function sendBatch(batch: Item[][], sourceLang: string, targetLang: string, batchChars?: number): Promise<Map<string, string>> {
+async function sendBatch(batch: Item[][], sourceLang: string, targetLang: string): Promise<Map<string, string>> {
   const items = batch.flat();
   const indices = new Map(items.map((item, i) => [item.id, i + 1]));
   const idByIndex = new Map(Array.from(indices, ([id, i]) => [i, id]));
   const html = batch.map((group) => buildChapterHtml(group, indices)).join("");
-
-  if (batchChars && html.length > batchChars) {
-    log(`batch request aborted: HTML payload size (${html.length}) exceeds limit (${batchChars})`);
-    return new Map();
-  }
 
   let translatedHtml: string;
   try {
@@ -189,13 +195,12 @@ async function sendBatch(batch: Item[][], sourceLang: string, targetLang: string
 
 async function sendBatchesSequentially(
   batches: Item[][][], sourceLang: string, targetLang: string,
-  onProgress?: (completed: number, total: number) => void,
-  batchChars?: number
+  onProgress?: (completed: number, total: number) => void
 ): Promise<Map<string, string>> {
   const translations = new Map<string, string>();
   let completed = 0;
   for (const batch of batches) {
-    for (const [id, text] of await sendBatch(batch, sourceLang, targetLang, batchChars)) translations.set(id, text);
+    for (const [id, text] of await sendBatch(batch, sourceLang, targetLang)) translations.set(id, text);
     completed += 1;
     onProgress?.(completed, batches.length);
   }
@@ -214,8 +219,7 @@ async function translate(
   for (const item of oversized) log(`unit ${item.id}: ${item.text.length} chars exceeds maxChars (${maxChars}), cue-level content cannot be split further, skipping without truncation`);
 
   const translations = await sendBatchesSequentially(batches, sourceLang, targetLang, (completed, total) =>
-    onProgress?.({ stage: "translate", completed, total }),
-    maxChars
+    onProgress?.({ stage: "translate", completed, total })
   );
 
   const oversizedIds = new Set(oversized.map((i) => i.id));
@@ -228,7 +232,7 @@ async function translate(
     const filteredGroups = chapterGroups.map((g) => g.filter((id) => missingSet.has(id))).filter((g) => g.length);
     const filteredItems = items.filter((i) => missingSet.has(i.id));
     const { batches: retryBatches } = buildBatches(filteredItems, filteredGroups, maxChars);
-    for (const [id, text] of await sendBatchesSequentially(retryBatches, sourceLang, targetLang, undefined, maxChars)) translations.set(id, text);
+    for (const [id, text] of await sendBatchesSequentially(retryBatches, sourceLang, targetLang)) translations.set(id, text);
     missing = missing.filter((id) => !translations.has(id));
   }
 
@@ -341,7 +345,7 @@ async function retryUntranslated(
   if (!candidates.length) return new Map();
   const items = candidates.map((c) => ({ id: String(c.unit.id), text: c.sourceText }));
   const { batches } = buildBatches(items, items.map((i) => [i.id]), maxChars);
-  const raw = await sendBatchesSequentially(batches, sourceLang, targetLang, undefined, maxChars);
+  const raw = await sendBatchesSequentially(batches, sourceLang, targetLang);
   const recovered = new Map<number, string>();
   for (const c of candidates) {
     const text = raw.get(String(c.unit.id));
@@ -391,7 +395,7 @@ async function retryWindowedMerged(
   if (!plans.length) return new Map();
   const items = plans.map((p) => ({ id: String(p.suspectId), text: p.windowedText }));
   const { batches } = buildBatches(items, items.map((i) => [i.id]), maxChars);
-  const raw = await sendBatchesSequentially(batches, sourceLang, targetLang, undefined, maxChars);
+  const raw = await sendBatchesSequentially(batches, sourceLang, targetLang);
   const recovered = new Map<number, string>();
   for (const plan of plans) {
     for (const [uid, text] of parseWindowResult(raw.get(String(plan.suspectId)), plan)) recovered.set(uid, text);
@@ -479,7 +483,7 @@ export async function translateUnits(
   units: Unit[], chapters: Chapter[], cues: Cue[],
   sourceLang: string, targetLang: string, options: TranslateUnitsOptions = {}
 ): Promise<{ translations: Record<string, string>; skipped: (string | number)[] }> {
-  const maxChars = options.maxChars ?? getMaxChars();
+  const maxChars = Math.floor((options.maxChars ?? getMaxChars()) * BATCH_PACK_RATIO);
   const resolved = new Map(units.filter((u) => u.resolved !== null).map((u) => [u.id, u.resolved as string]));
   const pending = units.filter((u) => u.resolved === null);
   const chapterOfUnit = new Map<number, number>();

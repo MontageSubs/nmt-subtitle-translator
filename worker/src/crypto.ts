@@ -1,9 +1,13 @@
-export async function hmacHex(secret: string, message: string): Promise<string> {
+export async function hmacRaw(secret: string, message: string): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey(
     "raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
   );
   const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
-  return [...new Uint8Array(signature)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return new Uint8Array(signature);
+}
+
+export async function hmacHex(secret: string, message: string): Promise<string> {
+  return [...(await hmacRaw(secret, message))].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export function base64url(input: string): string {

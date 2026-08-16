@@ -1,5 +1,6 @@
 import { issueSession, verifyToken } from "./token";
-import { computeAnswer, deriveOps } from "./challenge";
+import { computeAnswer, computeDevtoolsProof, deriveChallengeKey } from "./challenge";
+import { PROBE_EXPECTED_SCORE } from "./envProbe";
 import { verifyTurnstileToken, issueClearance, verifyClearance } from "./turnstile";
 import { recordSuccess, readStats, TursoConfig } from "./turso";
 
@@ -24,6 +25,7 @@ const STANDBY_TTL_MS = 60_000;
 const ACTIVE_TTL_MS = 10_000;
 const DEFAULT_MAX_BATCH_CHARS = 60_000;
 const MAX_PENDING_SUCCESS_PER_REQUEST = 500;
+const BATCH_CHARS_TOLERANCE = 1.1;
 
 function corsHeaders(origin: string): HeadersInit {
   return {
@@ -67,8 +69,8 @@ function reportPending(ctx: ExecutionContext, env: Env, pendingSuccess: unknown)
 async function handleHandshake(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
   const body = (await request.json().catch(() => ({}))) as { pendingSuccess?: number };
   reportPending(ctx, env, body.pendingSuccess);
-  const [{ token, challenge, nonce }, stats] = await Promise.all([issueSession(env.WORKER_SECRET, STANDBY_TTL_MS), loadStats(env)]);
-  return json({ token, challenge, nonce, maxChars: maxBatchChars(env), stats }, 200, origin);
+  const [{ token, challengeKey, nonce }, stats] = await Promise.all([issueSession(env.WORKER_SECRET, STANDBY_TTL_MS), loadStats(env)]);
+  return json({ token, challengeKey, nonce, maxChars: maxBatchChars(env), stats }, 200, origin);
 }
 
 interface TranslateRequestBody {
@@ -79,6 +81,8 @@ interface TranslateRequestBody {
   target?: string;
   pendingSuccess?: number;
   clearance?: string;
+  envScore?: number;
+  devtoolsProof?: number;
 }
 
 async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
@@ -92,12 +96,18 @@ async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext
   if (!text || !source || !target) return json({ error: "invalid translate request" }, 400, origin);
 
   const limit = maxBatchChars(env);
-  
-  const expected = computeAnswer(payload.nonce, text, deriveOps(payload.nonce));
+  if (text.length > limit * BATCH_CHARS_TOLERANCE) return json({ error: "payload exceeds maxChars", maxChars: limit }, 413, origin);
+
+  const keyBytes = await deriveChallengeKey(env.WORKER_SECRET, payload.nonce);
+  const expected = await computeAnswer(keyBytes, payload.nonce, text);
   if (expected !== body.answer) return json({ error: "challenge mismatch" }, 403, origin);
 
   const cleared = await verifyClearance(env.WORKER_SECRET, body.clearance);
   if (!cleared) {
+    if (body.envScore !== PROBE_EXPECTED_SCORE) return json({ error: "environment check failed", trigger_turnstile: true }, 429, origin);
+    if (body.devtoolsProof !== undefined && body.devtoolsProof === (await computeDevtoolsProof(keyBytes, payload.nonce))) {
+      return json({ error: "devtools detected", trigger_turnstile: true }, 429, origin);
+    }
     const ip = request.headers.get("CF-Connecting-IP") || "unknown";
     try {
       const { success } = await env.RATE_LIMITER.limit({ key: ip });
@@ -124,8 +134,8 @@ async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext
   if (typeof translatedHtml !== "string") return json({ error: "unexpected upstream response shape" }, 502, origin);
 
   reportPending(ctx, env, body.pendingSuccess);
-  const { token, challenge, nonce } = await issueSession(env.WORKER_SECRET, ACTIVE_TTL_MS);
-  return json({ translatedHtml, token, challenge, nonce, maxChars: limit }, 200, origin);
+  const { token, challengeKey, nonce } = await issueSession(env.WORKER_SECRET, ACTIVE_TTL_MS);
+  return json({ translatedHtml, token, challengeKey, nonce, maxChars: limit }, 200, origin);
 }
 
 async function handleTurnstile(request: Request, env: Env, origin: string): Promise<Response> {
@@ -137,6 +147,11 @@ async function handleTurnstile(request: Request, env: Env, origin: string): Prom
   if (!ok) return json({ error: "turnstile verification failed" }, 403, origin);
   const clearance = await issueClearance(env.WORKER_SECRET);
   return json({ clearance }, 200, origin);
+}
+
+function handleDevtoolsSignal(origin: string): Response {
+  console.log(JSON.stringify({ event: "devtools_signal", ts: Date.now() }));
+  return new Response(null, { status: 204, headers: corsHeaders(origin) });
 }
 
 export default {
@@ -156,6 +171,7 @@ export default {
       if (path === "/handshake") return await handleHandshake(request, env, ctx, origin);
       if (path === "/translate") return await handleTranslate(request, env, ctx, origin);
       if (path === "/turnstile") return await handleTurnstile(request, env, origin);
+      if (path === "/devtools-signal") return handleDevtoolsSignal(origin);
       return json({ error: "not found" }, 404, origin);
     } catch (e) {
       return json({ error: `internal error: ${e instanceof Error ? e.message : String(e)}` }, 500, origin);

@@ -1,5 +1,5 @@
 import { base64url, base64urlDecode, hmacHex, timingSafeEqual } from "./crypto";
-import { deriveOps, renderChallengeSource } from "./challenge";
+import { deriveChallengeKey } from "./challenge";
 
 interface TokenPayload {
   ts: number;
@@ -9,8 +9,12 @@ interface TokenPayload {
 
 export interface IssuedSession {
   token: string;
-  challenge: string;
+  challengeKey: string;
   nonce: number;
+}
+
+function toBase64(bytes: Uint8Array): string {
+  return base64url(String.fromCharCode(...bytes));
 }
 
 export async function issueSession(secret: string, ttl: number): Promise<IssuedSession> {
@@ -18,8 +22,8 @@ export async function issueSession(secret: string, ttl: number): Promise<IssuedS
   const payload: TokenPayload = { ts: Date.now(), ttl, nonce };
   const encoded = base64url(JSON.stringify(payload));
   const signature = await hmacHex(secret, encoded);
-  const challenge = renderChallengeSource(nonce, deriveOps(nonce));
-  return { token: `${encoded}.${signature}`, challenge, nonce };
+  const challengeKey = toBase64(await deriveChallengeKey(secret, nonce));
+  return { token: `${encoded}.${signature}`, challengeKey, nonce };
 }
 
 export async function verifyToken(secret: string, token: string): Promise<TokenPayload | null> {
