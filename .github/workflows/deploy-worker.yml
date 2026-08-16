@@ -35,35 +35,23 @@ jobs:
 
       - run: npm ci
 
-      - name: Push WORKER_SECRET
-        if: ${{ secrets.WORKER_SECRET != '' }}
-        env:
-          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
-        run: printf '%s' "$WORKER_SECRET" | npx wrangler secret put WORKER_SECRET
-
-      - name: Push TURNSTILE_SECRET_KEY
-        if: ${{ secrets.TURNSTILE_SECRET_KEY != '' }}
-        env:
-          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
-        run: printf '%s' "$TURNSTILE_SECRET_KEY" | npx wrangler secret put TURNSTILE_SECRET_KEY
-
-      - name: Push TURSO_URL
-        if: ${{ secrets.TURSO_URL != '' }}
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-        run: printf '%s' "$TURSO_URL" | npx wrangler secret put TURSO_URL
-
-      - name: Push TURSO_AUTH_TOKEN
-        if: ${{ secrets.TURSO_AUTH_TOKEN != '' }}
-        env:
-          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
-        run: printf '%s' "$TURSO_AUTH_TOKEN" | npx wrangler secret put TURSO_AUTH_TOKEN
-
-      - name: Push GOOGLE_TRANSLATE_API_KEY
-        if: ${{ secrets.GOOGLE_TRANSLATE_API_KEY != '' }}
-        env:
-          GOOGLE_TRANSLATE_API_KEY: ${{ secrets.GOOGLE_TRANSLATE_API_KEY }}
-        run: printf '%s' "$GOOGLE_TRANSLATE_API_KEY" | npx wrangler secret put GOOGLE_TRANSLATE_API_KEY
-
       - name: Deploy
         run: npx wrangler deploy
+
+      - name: Sync secrets
+        env:
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          GOOGLE_TRANSLATE_API_KEY: ${{ secrets.GOOGLE_TRANSLATE_API_KEY }}
+        run: |
+          set -e
+          for name in WORKER_SECRET TURNSTILE_SECRET_KEY TURSO_URL TURSO_AUTH_TOKEN GOOGLE_TRANSLATE_API_KEY; do
+            value="${!name}"
+            if [ -n "$value" ]; then
+              printf '%s' "$value" | npx wrangler secret put "$name"
+            else
+              echo "Skipping $name (not set)"
+            fi
+          done

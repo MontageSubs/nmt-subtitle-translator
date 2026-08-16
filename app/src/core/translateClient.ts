@@ -1,5 +1,6 @@
 import { Unit, Chapter, Cue, ProgressEvent } from "./types";
 import { postTranslateHtml, getMaxChars } from "./workerClient";
+import { uiLog } from "./uiLog";
 
 const GROUP_MARKER_PATTERN = /\u27e6g([^\u27e6\u27e7]+)\u27e7/g;
 const groupMarker = (id: number | string) => `\u27e6g${id}\u27e7`;
@@ -61,7 +62,7 @@ const LANGUAGE_SCRIPTS: Record<string, string> = {
 };
 
 function log(message: string) {
-  console.log(`[translate] ${message}`);
+  uiLog(`[translate] ${message}`);
 }
 
 function escapeHtml(text: string): string {

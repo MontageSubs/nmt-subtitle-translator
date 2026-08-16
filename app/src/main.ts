@@ -6,6 +6,7 @@ import { SOURCE_LANGUAGES, TARGET_LANGUAGES, isChineseTarget } from "./core/lang
 import { OutputMode } from "./core/types";
 import { handshake, bufferSuccess } from "./core/workerClient";
 import { startDevtoolsWatch } from "./core/devtoolsDetect";
+import { setUiLogSink } from "./core/uiLog";
 
 const SUCCESS_COMPLETION_THRESHOLD = 0.95;
 
@@ -108,11 +109,7 @@ function appendLog(message: string) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-const originalConsoleLog = console.log;
-console.log = (...args: unknown[]) => {
-  originalConsoleLog(...args);
-  appendLog(args.map(String).join(" "));
-};
+setUiLogSink(appendLog);
 
 async function readFile(file: File): Promise<string> {
   return file.text();

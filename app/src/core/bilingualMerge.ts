@@ -1,6 +1,7 @@
 import { Cue, Unit, Span, BilingualCue, MergeResult, OutputMode } from "./types";
 import { isChineseTarget } from "./languageProfiles";
 import { getSyncCutter, registerGlossaryTerm, SyncCutter } from "./segmenter";
+import { uiLog } from "./uiLog";
 
 const ELLIPSIS_PATTERN = /\.{2,}|…+/g;
 const DASH_ARTIFACT_PATTERN = /—+|-{2,}/g;
@@ -29,7 +30,7 @@ const MARKER_PATTERN = /\u27e6c(\d+)\u27e7/g;
 const RESIDUAL_MARKER_PATTERN = /\s*\u27e6[^\u27e6\u27e7]*\u27e7\s*/g;
 
 function log(message: string) {
-  console.log(`[merge] ${message}`);
+  uiLog(`[merge] ${message}`);
 }
 
 const LATIN_PUNCT_SOURCE_LANGS = new Set([
