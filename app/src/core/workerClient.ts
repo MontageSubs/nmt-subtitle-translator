@@ -38,9 +38,8 @@ function readPendingSuccess(): number {
   return Number(localStorage.getItem(PENDING_SUCCESS_KEY) || 0) || 0;
 }
 
-export function bufferSuccess(count: number): void {
-  if (count <= 0) return;
-  localStorage.setItem(PENDING_SUCCESS_KEY, String(readPendingSuccess() + count));
+export function bufferSuccess(): void {
+  localStorage.setItem(PENDING_SUCCESS_KEY, String(readPendingSuccess() + 1));
 }
 
 function clearPendingSuccess(): void {

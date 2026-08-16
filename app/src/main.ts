@@ -175,7 +175,7 @@ startButton.addEventListener("click", async () => {
 
     const completionRatio = extracted.cues.length ? (extracted.cues.length - result.missing_count) / extracted.cues.length : 0;
     if (completionRatio >= SUCCESS_COMPLETION_THRESHOLD) {
-      downloadLink.addEventListener("click", () => bufferSuccess(extracted.cues.length), { once: true });
+      downloadLink.addEventListener("click", () => bufferSuccess(), { once: true });
     }
   } catch (e) {
     appendLog(`错误：${e instanceof Error ? e.message : String(e)}`);

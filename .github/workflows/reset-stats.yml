@@ -1,0 +1,32 @@
+name: Reset Translation Stats
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '输入 RESET 确认清空 translation_stats 表（此操作不可撤销）'
+        required: true
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "RESET" ]; then
+            echo "confirmation text mismatch, aborting" >&2
+            exit 1
+          fi
+
+      - name: Clear translation_stats
+        env:
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: |
+          set -e
+          url="$(echo "$TURSO_URL" | sed -e 's#^libsql://#https://#' -e 's#/*$##')/v2/pipeline"
+          curl -sf -X POST "$url" \
+            -H "Authorization: Bearer $TURSO_AUTH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"requests":[{"type":"execute","stmt":{"sql":"DELETE FROM translation_stats"}},{"type":"close"}]}'
+          echo "translation_stats cleared"
