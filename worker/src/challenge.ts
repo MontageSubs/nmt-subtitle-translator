@@ -17,7 +17,3 @@ export function computeAnswer(keyBytes: Uint8Array, nonce: number, text: string)
   return signWithKey(keyBytes, `${nonce}:${text}`);
 }
 
-export function computeDevtoolsProof(keyBytes: Uint8Array, nonce: number): Promise<number> {
-  return signWithKey(keyBytes, `devtools:${nonce}`);
-}
-

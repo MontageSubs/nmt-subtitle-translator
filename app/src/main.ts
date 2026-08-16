@@ -5,7 +5,6 @@ import { merge } from "./core/bilingualMerge";
 import { SOURCE_LANGUAGES, TARGET_LANGUAGES, isChineseTarget } from "./core/languageProfiles";
 import { OutputMode } from "./core/types";
 import { handshake, bufferSuccess } from "./core/workerClient";
-import { startDevtoolsWatch } from "./core/devtoolsDetect";
 import { setUiLogSink } from "./core/uiLog";
 
 const SUCCESS_COMPLETION_THRESHOLD = 0.95;
@@ -123,8 +122,6 @@ handshake()
     statsLine.textContent = "";
   });
 
-startDevtoolsWatch();
-
 startButton.addEventListener("click", async () => {
   const srtFile = srtInput.files?.[0];
   if (!srtFile) return;
@@ -178,7 +175,7 @@ startButton.addEventListener("click", async () => {
 
     const completionRatio = extracted.cues.length ? (extracted.cues.length - result.missing_count) / extracted.cues.length : 0;
     if (completionRatio >= SUCCESS_COMPLETION_THRESHOLD) {
-      downloadLink.addEventListener("click", () => bufferSuccess(), { once: true });
+      downloadLink.addEventListener("click", () => bufferSuccess(extracted.cues.length), { once: true });
     }
   } catch (e) {
     appendLog(`错误：${e instanceof Error ? e.message : String(e)}`);

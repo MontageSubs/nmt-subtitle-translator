@@ -58,7 +58,7 @@ export default defineConfig(({ mode }) => ({
     rollupOptions: {
       output: {
         manualChunks(id: string) {
-          if (id.includes("core/envProbe") || id.includes("core/devtoolsDetect")) return ENV_PROBE_CHUNK;
+          if (id.includes("core/envProbe")) return ENV_PROBE_CHUNK;
         },
       },
     },

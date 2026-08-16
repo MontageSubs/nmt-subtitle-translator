@@ -1,6 +1,5 @@
 import { WORKER_URL, TURNSTILE_SITE_KEY, FALLBACK_MAX_CHARS, REQUEST_TIMEOUT_MS, IDLE_STANDBY_MARGIN_MS, assertConfigured } from "../config";
 import { computeEnvScore } from "./envProbe";
-import { wasDevtoolsDetected } from "./devtoolsDetect";
 
 const PENDING_SUCCESS_KEY = "nmt_pending_success";
 const STANDBY_TTL_MS = 60_000;
@@ -39,8 +38,9 @@ function readPendingSuccess(): number {
   return Number(localStorage.getItem(PENDING_SUCCESS_KEY) || 0) || 0;
 }
 
-export function bufferSuccess(): void {
-  localStorage.setItem(PENDING_SUCCESS_KEY, String(readPendingSuccess() + 1));
+export function bufferSuccess(count: number): void {
+  if (count <= 0) return;
+  localStorage.setItem(PENDING_SUCCESS_KEY, String(readPendingSuccess() + count));
 }
 
 function clearPendingSuccess(): void {
@@ -54,7 +54,7 @@ async function request(path: string, body: unknown): Promise<any> {
   try {
     const response = await fetch(`${WORKER_URL}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "text/plain;charset=UTF-8" },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -119,10 +119,6 @@ function computeAnswer(challengeKey: string, nonce: number, text: string): Promi
   return signChallenge(challengeKey, `${nonce}:${text}`);
 }
 
-function computeDevtoolsProof(challengeKey: string, nonce: number): Promise<number> {
-  return signChallenge(challengeKey, `devtools:${nonce}`);
-}
-
 let turnstileLoad: Promise<void> | null = null;
 
 function loadTurnstileScript(): Promise<void> {
@@ -164,13 +160,11 @@ async function attemptTranslate(text: string, source: string, target: string): P
   const active = await ensureSession();
   const answer = await computeAnswer(active.challengeKey, active.nonce, text);
   const envScore = computeEnvScore(active.nonce);
-  const devtoolsProof = wasDevtoolsDetected() ? await computeDevtoolsProof(active.challengeKey, active.nonce) : undefined;
   const pending = readPendingSuccess();
   const payload = await request("/translate", {
     token: active.token,
     answer,
     envScore,
-    ...(devtoolsProof !== undefined ? { devtoolsProof } : {}),
     text,
     source,
     target,

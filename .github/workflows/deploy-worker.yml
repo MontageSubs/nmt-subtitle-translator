@@ -37,6 +37,17 @@ jobs:
 
       - run: npm run typecheck
 
+      - name: Inject D1 database_id
+        env:
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+        run: |
+          set -e
+          if [ -z "$D1_DATABASE_ID" ]; then
+            echo "D1_DATABASE_ID secret not set" >&2
+            exit 1
+          fi
+          sed -i "s/REPLACE_WITH_D1_DATABASE_ID/$D1_DATABASE_ID/" wrangler.toml
+
       - name: Deploy
         run: npx wrangler deploy
 

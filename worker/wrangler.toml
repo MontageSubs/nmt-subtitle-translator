@@ -13,20 +13,40 @@ enabled = true
 [vars]
 ALLOWED_ORIGIN = "https://subs.js.org"
 MAX_BATCH_CHARS = "8000"
+# 限流最小计费单位（字符），单次 /translate 按 ceil(字符数/该值) 计入下方 RATE_LIMITER 的 hits，
+# 使限流天然按字符总量计费而非请求次数，任务内分片越多不代表限得越紧。
+RATE_LIMIT_UNIT_CHARS = "500"
 
-# Cloudflare 原生按 Key 限流绑定，不占用 KV 配额。
+# Cloudflare 原生按 Key 限流绑定，周期结束自动回填，无需任何存储代码。
+# limit 按上方 RATE_LIMIT_UNIT_CHARS 折算：600 hits × 500 字符 = 每 60 秒 30 万字符预算，
+# 覆盖一次完整翻译任务的所有分片仍留有余量，真正的持续滥用才会触顶。
 # 当前 wrangler 对 Rate Limiting 绑定的配置语法请以 Cloudflare 最新文档为准，
 # 下方写法基于 unsafe.bindings 通用挂载方式，部署前请核对一次。
 [[unsafe.bindings]]
 name = "RATE_LIMITER"
 type = "ratelimit"
 namespace_id = "1001"
-simple = { limit = 30, period = 60 }
+simple = { limit = 600, period = 60 }
+
+# D1 数据库：仅存 IP 黑名单（隔离期/封禁），只有触发违规信号的 IP 才写入，
+# 正常用户请求全程不落库。翻译计数走 Turso（见下方 secrets），两者互不占用彼此配额。
+# database_id 不写入本文件明文：先执行一次
+#   npx wrangler d1 create nmt-relay
+# 把返回的 id 存进 GitHub Secrets 的 D1_DATABASE_ID，deploy-worker.yml 部署时用 sed 注入替换
+# 下方占位符，本文件在仓库里始终保持占位符原样。表结构由 reputation.ts 首次调用时自动建立。
+[[d1_databases]]
+binding = "DB"
+database_name = "nmt-relay"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# 每日一次清理过期黑名单记录，保持表体积恒定，免费额度下无需人工维护。
+[triggers]
+crons = ["17 3 * * *"]
 
 # 以下均通过 GitHub 仓库 Settings → Secrets and variables → Actions → Secrets 配置，
 # 由 deploy-worker.yml 在每次部署时自动 `wrangler secret put` 下发，不写入本文件：
 #   WORKER_SECRET          HMAC签名密钥，任意长随机字符串，自行生成保管
-#   TURSO_URL               形如 https://<db>-<org>.turso.io
+#   TURSO_URL               形如 https://<db>-<org>.turso.io，承载翻译计数写入
 #   TURSO_AUTH_TOKEN         Turso 数据库鉴权 token
 #   TURNSTILE_SECRET_KEY     Cloudflare Turnstile 后台密钥
 #   GOOGLE_TRANSLATE_API_KEY 可选，未设置时走匿名上游端点
