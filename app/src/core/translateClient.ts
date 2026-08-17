@@ -1,5 +1,5 @@
 import { Unit, Chapter, Cue, ProgressEvent } from "./types";
-import { postTranslateHtml, getMaxChars, WorkerRequestError } from "./workerClient";
+import { postTranslateHtml, postTranslateBatch, getMaxChars, WorkerRequestError } from "./workerClient";
 import { uiLog } from "./uiLog";
 
 const GROUP_MARKER_PATTERN = /\u27e6g([^\u27e6\u27e7]+)\u27e7/g;
@@ -173,21 +173,15 @@ function rethrowIfFatal(e: unknown): void {
   if (e instanceof WorkerRequestError && e.fatal) throw e;
 }
 
-async function sendBatch(batch: Item[][], sourceLang: string, targetLang: string): Promise<Map<string, string>> {
+function prepareBatch(batch: Item[][]): { items: Item[]; idByIndex: Map<number, string>; html: string } {
   const items = batch.flat();
   const indices = new Map(items.map((item, i) => [item.id, i + 1]));
   const idByIndex = new Map(Array.from(indices, ([id, i]) => [i, id]));
   const html = batch.map((group) => buildChapterHtml(group, indices)).join("");
+  return { items, idByIndex, html };
+}
 
-  let translatedHtml: string;
-  try {
-    translatedHtml = await sendHtml(html, sourceLang, targetLang);
-  } catch (e) {
-    rethrowIfFatal(e);
-    log(`batch request failed: ${e}`);
-    return new Map();
-  }
-
+function extractTranslations(translatedHtml: string, items: Item[], idByIndex: Map<number, string>): Map<string, string> {
   const parsed = parseByMarkers(translatedHtml);
   const sourceById = new Map(items.map((item) => [item.id, item.text]));
   const result = new Map<string, string>();
@@ -197,6 +191,18 @@ async function sendBatch(batch: Item[][], sourceLang: string, targetLang: string
     if (hasContent(text) || !hasContent(sourceById.get(itemId))) result.set(itemId, text);
   }
   return result;
+}
+
+async function sendBatch(batch: Item[][], sourceLang: string, targetLang: string): Promise<Map<string, string>> {
+  const { items, idByIndex, html } = prepareBatch(batch);
+  try {
+    const translatedHtml = await sendHtml(html, sourceLang, targetLang);
+    return extractTranslations(translatedHtml, items, idByIndex);
+  } catch (e) {
+    rethrowIfFatal(e);
+    log(`batch request failed: ${e}`);
+    return new Map();
+  }
 }
 
 async function sendBatchesSequentially(
@@ -213,6 +219,36 @@ async function sendBatchesSequentially(
   return translations;
 }
 
+async function sendBatchesMerged(
+  batches: Item[][][], sourceLang: string, targetLang: string,
+  onProgress?: (completed: number, total: number) => void
+): Promise<Map<string, string>> {
+  if (!batches.length) return new Map();
+  const prepared = batches.map(prepareBatch);
+  onProgress?.(0, batches.length);
+
+  let results: (string | null)[];
+  try {
+    results = await postTranslateBatch(prepared.map((p) => p.html), sourceLang, targetLang);
+  } catch (e) {
+    rethrowIfFatal(e);
+    log(`merged batch request failed: ${e}`);
+    results = prepared.map(() => null);
+  }
+
+  const translations = new Map<string, string>();
+  prepared.forEach(({ items, idByIndex }, i) => {
+    const translatedHtml = results[i];
+    if (translatedHtml === null || translatedHtml === undefined) {
+      log(`batch ${i + 1}/${prepared.length}: no result from worker, will retry missing units individually`);
+      return;
+    }
+    for (const [id, text] of extractTranslations(translatedHtml, items, idByIndex)) translations.set(id, text);
+  });
+  onProgress?.(batches.length, batches.length);
+  return translations;
+}
+
 function cueRef(itemId: string): string {
   return itemId.split(":", 1)[0];
 }
@@ -224,7 +260,7 @@ async function translate(
   const { batches, oversized } = buildBatches(items, chapterGroups, maxChars);
   for (const item of oversized) log(`unit ${item.id}: ${item.text.length} chars exceeds maxChars (${maxChars}), cue-level content cannot be split further, skipping without truncation`);
 
-  const translations = await sendBatchesSequentially(batches, sourceLang, targetLang, (completed, total) =>
+  const translations = await sendBatchesMerged(batches, sourceLang, targetLang, (completed, total) =>
     onProgress?.({ stage: "translate", completed, total })
   );
 

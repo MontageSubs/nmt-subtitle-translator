@@ -4,6 +4,7 @@ import { computeProbeBitmap } from "./envProbe";
 const PENDING_SUCCESS_KEY = "nmt_pending_success";
 const STANDBY_TTL_MS = 60_000;
 const ACTIVE_TTL_MS = 20_000;
+const BATCH_JOIN_SEPARATOR = "\u0000";
 
 export interface Stats {
   total: number;
@@ -177,14 +178,42 @@ async function attemptTranslate(text: string, source: string, target: string): P
   return { translatedHtml: payload.translatedHtml, maxChars: payload.maxChars || active.maxChars };
 }
 
-export async function postTranslateHtml(text: string, source: string, target: string): Promise<{ translatedHtml: string; maxChars: number }> {
+async function attemptTranslateBatch(htmls: string[], source: string, target: string): Promise<{ results: (string | null)[]; maxChars: number }> {
+  const active = await ensureSession();
+  const probeBitmap = computeProbeBitmap();
+  const answer = await computeAnswer(active.challengeKey, active.nonce, htmls.join(BATCH_JOIN_SEPARATOR), probeBitmap);
+  const pending = readPendingSuccess();
+  const payload = await request("/translate-batch", {
+    token: active.token,
+    answer,
+    probeBitmap,
+    batches: htmls,
+    source,
+    target,
+    ...(pending ? { pendingSuccess: pending } : {}),
+    ...(clearance ? { clearance } : {}),
+  });
+  if (pending) clearPendingSuccess();
+  adoptSession(payload, ACTIVE_TTL_MS);
+  return { results: payload.results, maxChars: payload.maxChars || active.maxChars };
+}
+
+async function withTurnstileRetry<T>(attempt: () => Promise<T>): Promise<T> {
   try {
-    return await attemptTranslate(text, source, target);
+    return await attempt();
   } catch (e) {
     if (e instanceof WorkerRequestError && e.triggerTurnstile) {
       await resolveTurnstile();
-      return attemptTranslate(text, source, target);
+      return attempt();
     }
     throw e;
   }
+}
+
+export function postTranslateHtml(text: string, source: string, target: string): Promise<{ translatedHtml: string; maxChars: number }> {
+  return withTurnstileRetry(() => attemptTranslate(text, source, target));
+}
+
+export function postTranslateBatch(htmls: string[], source: string, target: string): Promise<(string | null)[]> {
+  return withTurnstileRetry(() => attemptTranslateBatch(htmls, source, target)).then((r) => r.results);
 }
