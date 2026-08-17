@@ -41,12 +41,11 @@
 本服务依托于业界标准的云基础设施，数据在传输过程中会经过以下平台。请注意，由于这些平台主要分布在全球，你的数据可能会被传输至相应的司法管辖区，例如美国、英国或欧盟等。
 
 ### 1. 基础设施平台
-*   **GitHub**：网页服务托管在 GitHub Pages 上，GitHub 可能会收集你的访问信息（如 IP 地址、浏览器等）。这些信息对我们不公开，我们也无权访问，详情请阅读 [GitHub 的隐私政策]
-(https://docs.github.com/zh/site-policy/privacy-policies/github-general-privacy-statement)。
-*   **Cloudflare**：服务依靠 Cloudflare Workers 进行计算，并使用 Rate Limiting 和 Turnstile 验证服务支撑反滥用机制。Cloudflare 可能会收集你的访问信息（如 IP 地址、浏览器等），这些信息对我们不公开且我们无权访问。详情请阅读 [Cloudflare 的隐私政策](https://www.cloudflare.com/zh-cn/privacypolicy/)。
+*   **GitHub**：网页服务托管在 GitHub Pages 上，GitHub 可能会收集你的访问信息（如 IP 地址、浏览器等）。这些信息对我们不公开，我们也无权访问，详情请阅读 [GitHub的隐私政策](https://docs.github.com/zh/site-policy/privacy-policies/github-general-privacy-statement)。
+*   **Cloudflare**：服务依靠 Cloudflare Workers 进行计算，并使用 Rate Limiting 和 Turnstile 验证服务支撑反滥用机制。Cloudflare 可能会收集你的访问信息（如 IP 地址、浏览器等），这些信息对我们不公开且我们无权访问。详情请阅读 [Cloudflare的隐私政策](https://www.cloudflare.com/zh-cn/privacypolicy/)。
 *   **Turso**：我们使用 Turso 数据库仅用于存储翻译成功次数的全局统计量。没有任何个人数据被记录，你也不会直接请求该服务。
 
-### 2. 翻译服务提供商（上游 API）
+### 2. 翻译服务提供商
 为了最大化保护服务可用性和用户隐私，本服务在与所有上游翻译提供商交互时均采用**中继架构** ：
 
 *   **IP 处理**：上游提供商无法获取你的真实 IP 地址，他们仅看到请求来自我们的中继服务器。
@@ -54,7 +53,7 @@
 *   **实时透传**：我们不对传输内容进行审查或记录，内容原样发送并原样返回。请注意，由于我们不存储内容，任何违规内容导致的服务受限将影响所有用户。
 
 **当前支持的服务提供商：**
-*   **Google**：请参阅 [Google 服务条款](https://policies.google.com/terms?hl=zh-CN)与 [Google 隐私政策](https://policies.google.com/privacy?hl=zh-CN)了解其数据处理方式。
+*   **Google**：请参阅 [Google服务条款](https://policies.google.com/terms?hl=zh-CN) 与 [Google隐私政策](https://policies.google.com/privacy?hl=zh-CN) 了解其数据处理方式。
 
 ## 法律合规与用户权利
 
@@ -78,9 +77,15 @@
 *   **社群平台**：Telegram、Discord、IRC (Libera Chat) 或 Matrix。
 
 **具体事务处理：**
-*   **问题反馈**：请提交 [GitHub 议题（Issue）](https://github.com/MontageSubs/nmt-subtitle-translator/issues)。
+*   **问题反馈**：请提交 [GitHub议题（Issue）](https://github.com/MontageSubs/nmt-subtitle-translator/issues)。
 *   **隐私、媒体等正式问题**：请通过上述社群平台联系社群管理员。
 *   **安全漏洞报告**：为了安全起见，请勿在公开环境下发布，请务必通过上述平台与我们私下联系。
 
 **为什么我们不提供公开电子邮箱？**
 作为一个由志愿者维护的小型开源项目，我们优先采用社群直接沟通的方式，以避免垃圾邮件干扰并确保问题能被高效分流至合适的贡献者。如果未来我们设立了组织邮箱，将会在此更新。
+
+---
+
+**生效日期：** 2026年8月17日
+
+**历史版本：** 你可以通过 [版本历史](https://github.com/MontageSubs/nmt-subtitle-translator/commits/main/PRIVACY.zh-Hans.md) 查看本政策的修订记录。
