@@ -160,6 +160,7 @@ async function resolveTurnstile(): Promise<void> {
 
 async function attemptTranslate(text: string, source: string, target: string): Promise<{ translatedHtml: string; maxChars: number }> {
   const active = await ensureSession();
+  session = null;
   const probeBitmap = computeProbeBitmap();
   const answer = await computeAnswer(active.challengeKey, active.nonce, text, probeBitmap);
   const pending = readPendingSuccess();
@@ -180,6 +181,7 @@ async function attemptTranslate(text: string, source: string, target: string): P
 
 async function attemptTranslateBatch(htmls: string[], source: string, target: string): Promise<{ results: (string | null)[]; maxChars: number }> {
   const active = await ensureSession();
+  session = null;
   const probeBitmap = computeProbeBitmap();
   const answer = await computeAnswer(active.challengeKey, active.nonce, htmls.join(BATCH_JOIN_SEPARATOR), probeBitmap);
   const pending = readPendingSuccess();
