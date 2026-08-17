@@ -81,7 +81,7 @@ export async function handleTranslate(request: Request, env: Env, ctx: Execution
   }
 
   try {
-    const success = await consumeRateLimit(env, ip, text.length, gate.degraded);
+    const success = await consumeRateLimit(env, ip, text.length, gate.degraded || cleared);
     if (!success) {
       logGate("rate_limited", ip, { cleared });
       return json({ error: "rate_limited", trigger_turnstile: !cleared }, 429, origin, env);

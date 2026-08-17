@@ -89,7 +89,7 @@ export async function handleTranslateBatch(request: Request, env: Env, ctx: Exec
 
   const totalChars = batches.reduce((sum, b) => sum + b.length, 0);
   try {
-    const success = await consumeRateLimit(env, ip, totalChars, gate.degraded);
+    const success = await consumeRateLimit(env, ip, totalChars, gate.degraded || cleared);
     if (!success) {
       logGate("rate_limited", ip, { cleared });
       return json({ error: "rate_limited", trigger_turnstile: !cleared }, 429, origin, env);
