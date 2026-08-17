@@ -1,5 +1,6 @@
 import { base64url, base64urlDecode, hmacHex, timingSafeEqual } from "./crypto";
 import { deriveChallengeKey } from "./challenge";
+import { SecretRing, ringSecrets } from "./secret";
 
 interface TokenPayload {
   ts: number;
@@ -13,31 +14,39 @@ export interface IssuedSession {
   nonce: number;
 }
 
+export interface VerifiedToken {
+  payload: TokenPayload;
+  secret: string;
+}
+
 function toBase64(bytes: Uint8Array): string {
   return base64url(String.fromCharCode(...bytes));
 }
 
-export async function issueSession(secret: string, ttl: number): Promise<IssuedSession> {
+export async function issueSession(ring: SecretRing, ttl: number): Promise<IssuedSession> {
   const nonce = crypto.getRandomValues(new Uint32Array(1))[0];
   const payload: TokenPayload = { ts: Date.now(), ttl, nonce };
   const encoded = base64url(JSON.stringify(payload));
-  const signature = await hmacHex(secret, encoded);
-  const challengeKey = toBase64(await deriveChallengeKey(secret, nonce));
+  const signature = await hmacHex(ring.current, encoded);
+  const challengeKey = toBase64(await deriveChallengeKey(ring.current, nonce));
   return { token: `${encoded}.${signature}`, challengeKey, nonce };
 }
 
-export async function verifyToken(secret: string, token: string): Promise<TokenPayload | null> {
+export async function verifyToken(ring: SecretRing, token: string): Promise<VerifiedToken | null> {
   const [encoded, signature] = token.split(".");
   if (!encoded || !signature) return null;
-  const expected = await hmacHex(secret, encoded);
-  if (!timingSafeEqual(expected, signature)) return null;
-  let payload: TokenPayload;
-  try {
-    payload = JSON.parse(base64urlDecode(encoded));
-  } catch {
-    return null;
+  for (const secret of ringSecrets(ring)) {
+    const expected = await hmacHex(secret, encoded);
+    if (!timingSafeEqual(expected, signature)) continue;
+    let payload: TokenPayload;
+    try {
+      payload = JSON.parse(base64urlDecode(encoded));
+    } catch {
+      return null;
+    }
+    const age = Date.now() - payload.ts;
+    if (!Number.isFinite(age) || age < -5000 || age > payload.ttl) return null;
+    return { payload, secret };
   }
-  const age = Date.now() - payload.ts;
-  if (!Number.isFinite(age) || age < -5000 || age > payload.ttl) return null;
-  return payload;
+  return null;
 }

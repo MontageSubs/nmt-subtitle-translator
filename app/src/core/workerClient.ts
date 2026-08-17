@@ -1,9 +1,9 @@
 import { WORKER_URL, TURNSTILE_SITE_KEY, FALLBACK_MAX_CHARS, REQUEST_TIMEOUT_MS, IDLE_STANDBY_MARGIN_MS, assertConfigured } from "../config";
-import { computeEnvScore } from "./envProbe";
+import { computeProbeBitmap } from "./envProbe";
 
 const PENDING_SUCCESS_KEY = "nmt_pending_success";
 const STANDBY_TTL_MS = 60_000;
-const ACTIVE_TTL_MS = 10_000;
+const ACTIVE_TTL_MS = 20_000;
 
 export interface Stats {
   total: number;
@@ -111,11 +111,11 @@ async function signChallenge(challengeKey: string, message: string): Promise<num
     "raw", decodeBase64Url(challengeKey) as BufferSource, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
   );
   const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
-  return new DataView(signature).getUint32(0) % 1_000_000;
+  return new DataView(signature).getUint32(0);
 }
 
-function computeAnswer(challengeKey: string, nonce: number, text: string): Promise<number> {
-  return signChallenge(challengeKey, `${nonce}:${text}`);
+function computeAnswer(challengeKey: string, nonce: number, text: string, probeBitmap: number): Promise<number> {
+  return signChallenge(challengeKey, `${nonce}:${probeBitmap}:${text}`);
 }
 
 let turnstileLoad: Promise<void> | null = null;
@@ -157,13 +157,13 @@ async function resolveTurnstile(): Promise<void> {
 
 async function attemptTranslate(text: string, source: string, target: string): Promise<{ translatedHtml: string; maxChars: number }> {
   const active = await ensureSession();
-  const answer = await computeAnswer(active.challengeKey, active.nonce, text);
-  const envScore = computeEnvScore(active.nonce);
+  const probeBitmap = computeProbeBitmap();
+  const answer = await computeAnswer(active.challengeKey, active.nonce, text, probeBitmap);
   const pending = readPendingSuccess();
   const payload = await request("/translate", {
     token: active.token,
     answer,
-    envScore,
+    probeBitmap,
     text,
     source,
     target,

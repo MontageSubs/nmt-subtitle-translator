@@ -1,4 +1,5 @@
 import { base64url, base64urlDecode, hmacHex, timingSafeEqual } from "./crypto";
+import { SecretRing, ringSecrets } from "./secret";
 
 const VERIFY_ENDPOINT = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 const CLEARANCE_TTL_MS = 5 * 60_000;
@@ -10,20 +11,23 @@ export async function verifyTurnstileToken(secretKey: string, responseToken: str
   return Boolean(data.success);
 }
 
-export async function issueClearance(secret: string): Promise<string> {
+export async function issueClearance(ring: SecretRing): Promise<string> {
   const encoded = base64url(JSON.stringify({ exp: Date.now() + CLEARANCE_TTL_MS }));
-  return `${encoded}.${await hmacHex(secret, encoded)}`;
+  return `${encoded}.${await hmacHex(ring.current, encoded)}`;
 }
 
-export async function verifyClearance(secret: string, clearance: string | null | undefined): Promise<boolean> {
+export async function verifyClearance(ring: SecretRing, clearance: string | null | undefined): Promise<boolean> {
   if (!clearance) return false;
   const [encoded, signature] = clearance.split(".");
   if (!encoded || !signature) return false;
-  if (!timingSafeEqual(await hmacHex(secret, encoded), signature)) return false;
-  try {
-    const { exp } = JSON.parse(base64urlDecode(encoded));
-    return Date.now() < exp;
-  } catch {
-    return false;
+  for (const secret of ringSecrets(ring)) {
+    if (!timingSafeEqual(await hmacHex(secret, encoded), signature)) continue;
+    try {
+      const { exp } = JSON.parse(base64urlDecode(encoded));
+      return Date.now() < exp;
+    } catch {
+      return false;
+    }
   }
+  return false;
 }

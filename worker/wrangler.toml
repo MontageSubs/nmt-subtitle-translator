@@ -39,18 +39,32 @@ binding = "DB"
 database_name = "nmt-relay"
 database_id = "REPLACE_WITH_D1_DATABASE_ID"
 
-# 每日一次清理过期黑名单记录，保持表体积恒定，免费额度下无需人工维护。
+# 两条定时任务，按 cron 表达式在 index.ts 的 scheduled() 内分派：
+#   17 3 * * *  每日清理过期黑名单记录，保持表体积恒定
+#   0  4 * * 0  每周日密钥自轮换（见下方 WORKER_SECRET 说明），修改本行需同步改 index.ts 的 ROTATION_CRON 常量
 [triggers]
-crons = ["17 3 * * *"]
+crons = ["17 3 * * *", "0 4 * * 0"]
 
 # 以下均通过 GitHub 仓库 Settings → Secrets and variables → Actions → Secrets 配置，
 # 由 deploy-worker.yml 在每次部署时自动 `wrangler secret put` 下发，不写入本文件：
-#   WORKER_SECRET          HMAC签名密钥，任意长随机字符串，自行生成保管
 #   TURSO_URL               形如 https://<db>-<org>.turso.io，承载翻译计数写入
 #   TURSO_AUTH_TOKEN         Turso 数据库鉴权 token
 #   TURNSTILE_SECRET_KEY     Cloudflare Turnstile 后台密钥
 #   GOOGLE_TRANSLATE_API_KEY 可选，未设置时走匿名上游端点
-# 另需配置 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID（Secrets）供 wrangler 鉴权。
+#   WORKER_SALT              人工设置一次的静态盐，极少变动，与轮换密钥一起派生出实际签名密钥
+#   CF_API_TOKEN             与部署用的 CLOUDFLARE_API_TOKEN 同一个值，额外下发给 Worker 自身，
+#                            供 scheduled() 里的自轮换逻辑调用 Cloudflare 管理 API 改写自己的 secret；
+#                            该 token 需具备 Workers Scripts:Edit 权限——部署流程本就要求这个权限，
+#                            这里只是把同一份凭证再交给 Worker 运行时持有一份，不引入新的信任层级
+#   CF_ACCOUNT_ID            与部署用的 CLOUDFLARE_ACCOUNT_ID 同一个值，同上原因下发给 Worker
+# 另需配置 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID（Secrets）供 wrangler 本身鉴权。
+#
+# WORKER_SECRET 不经 GitHub 流转、也不由 deploy-worker.yml 同步：
+#   首次部署前手动执行一次 `npx wrangler secret put WORKER_SECRET`，随意填入一段长随机字符串即可
+#   （无需三行格式，缺失的 previous/rotatedAt 会被自动忽略）。此后每周日由 Worker 自己调用
+#   Cloudflare 管理 API 原地轮换：当前值降级为"上一个"，生成新值作为"当前"，写入 unix 秒时间戳；
+#   验证逻辑发现某次请求的 token 是用"上一个"密钥签的，且轮换时间在 1 小时内，仍放行——
+#   超过 1 小时自然只读第一行，无需任何额外操作使旧密钥失效。GitHub 侧永远不持有这个值的明文。
 #
 # Turnstile site key（公开信息，非敏感）配置在 GitHub 仓库 Variables：
 #   TURNSTILE_SITE_KEY，构建时注入前端为 VITE_TURNSTILE_SITE_KEY（见 deploy-pages.yml）

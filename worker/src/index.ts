@@ -1,9 +1,11 @@
 import { issueSession, verifyToken } from "./token";
 import { computeAnswer, deriveChallengeKey } from "./challenge";
-import { PROBE_EXPECTED_SCORE } from "./envProbe";
+import { probeBitmapValid } from "./envProbe";
 import { verifyTurnstileToken, issueClearance, verifyClearance } from "./turnstile";
 import { recordSuccess, readStats, TursoConfig } from "./turso";
 import { checkGate, consumeFreeQuota, recordViolation, recordCaptchaSolved, pruneReputation } from "./reputation";
+import { resolveSecretRing, nextRingText } from "./secret";
+import { consumeNonceOnce } from "./replay";
 
 export interface RateLimit {
   limit(options: { key: string }): Promise<{ success: boolean }>;
@@ -12,12 +14,15 @@ export interface RateLimit {
 export interface Env {
   ALLOWED_ORIGIN: string;
   WORKER_SECRET: string;
+  WORKER_SALT?: string;
   MAX_BATCH_CHARS?: string;
   RATE_LIMIT_UNIT_CHARS?: string;
   GOOGLE_TRANSLATE_API_KEY?: string;
   TURSO_URL?: string;
   TURSO_AUTH_TOKEN?: string;
   TURNSTILE_SECRET_KEY?: string;
+  CF_API_TOKEN?: string;
+  CF_ACCOUNT_ID?: string;
   RATE_LIMITER: RateLimit;
   DB: D1Database;
 }
@@ -25,12 +30,15 @@ export interface Env {
 const UPSTREAM_ENDPOINT = "https://translate-pa.googleapis.com/v1/translateHtml";
 const FALLBACK_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const STANDBY_TTL_MS = 60_000;
-const ACTIVE_TTL_MS = 10_000;
+const ACTIVE_TTL_MS = 20_000;
 const DEFAULT_MAX_BATCH_CHARS = 60_000;
 const DEFAULT_RATE_LIMIT_UNIT_CHARS = 500;
 const MAX_PENDING_SUCCESS_PER_REQUEST = 500;
 const BATCH_CHARS_TOLERANCE = 1.1;
 const PREFLIGHT_MAX_AGE = "7200";
+const DEGRADED_RATE_LIMIT_MULTIPLIER = 4;
+const SCRIPT_NAME = "nmt-relay";
+const ROTATION_CRON = "0 4 * * 0";
 
 function corsHeaders(origin: string): HeadersInit {
   return {
@@ -96,11 +104,21 @@ function reportPending(ctx: ExecutionContext, env: Env, pendingSuccess: unknown)
 }
 
 function flagViolation(ctx: ExecutionContext, env: Env, ip: string, now: number): void {
-  ctx.waitUntil(recordViolation(env.DB, ip, now).catch((e) => reportError("recordViolation failed", e)));
+  ctx.waitUntil(recordViolation(env.DB, ip, now).catch((e) => logGate("d1_write_failed", ip, { op: "recordViolation", message: String(e) })));
 }
 
-async function consumeRateLimit(env: Env, ip: string, chars: number): Promise<boolean> {
-  const hits = Math.max(1, Math.ceil(chars / rateLimitUnitChars(env)));
+async function gateForRequest(env: Env, ip: string, now: number) {
+  try {
+    return await checkGate(env.DB, ip, now);
+  } catch (e) {
+    logGate("d1_read_failed_failopen", ip, { message: e instanceof Error ? e.message : String(e) });
+    return { blocked: false, quarantined: false, requireClearance: false, degraded: true };
+  }
+}
+
+async function consumeRateLimit(env: Env, ip: string, chars: number, degraded: boolean): Promise<boolean> {
+  const unit = rateLimitUnitChars(env) / (degraded ? DEGRADED_RATE_LIMIT_MULTIPLIER : 1);
+  const hits = Math.max(1, Math.ceil(chars / unit));
   for (let i = 0; i < hits; i++) {
     const { success } = await env.RATE_LIMITER.limit({ key: ip });
     if (!success) return false;
@@ -111,7 +129,8 @@ async function consumeRateLimit(env: Env, ip: string, chars: number): Promise<bo
 async function handleHandshake(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
   const body = (await parseBody<{ pendingSuccess?: number }>(request)) || {};
   reportPending(ctx, env, body.pendingSuccess);
-  const [{ token, challengeKey, nonce }, stats] = await Promise.all([issueSession(env.WORKER_SECRET, STANDBY_TTL_MS), loadStats(env)]);
+  const ring = await resolveSecretRing(env.WORKER_SECRET, env.WORKER_SALT || "");
+  const [{ token, challengeKey, nonce }, stats] = await Promise.all([issueSession(ring, STANDBY_TTL_MS), loadStats(env)]);
   return json({ token, challengeKey, nonce, maxChars: maxBatchChars(env), stats }, 200, origin);
 }
 
@@ -123,7 +142,7 @@ interface TranslateRequestBody {
   target?: string;
   pendingSuccess?: number;
   clearance?: string;
-  envScore?: number;
+  probeBitmap?: number;
 }
 
 async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
@@ -133,19 +152,24 @@ async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
   const now = Date.now();
 
-  const gate = await checkGate(env.DB, ip, now).catch((e) => {
-    reportError("checkGate failed", e);
-    return { blocked: false, quarantined: false, requireClearance: false };
-  });
+  const gate = await gateForRequest(env, ip, now);
   if (gate.blocked) {
     logGate("ip_blocked", ip);
     return json({ error: "too many failed verifications, try again later" }, 403, origin);
   }
 
-  const payload = await verifyToken(env.WORKER_SECRET, body.token || "");
-  if (!payload) {
+  const ring = await resolveSecretRing(env.WORKER_SECRET, env.WORKER_SALT || "");
+  const verified = await verifyToken(ring, body.token || "");
+  if (!verified) {
     flagViolation(ctx, env, ip, now);
     return json({ error: "invalid or expired token" }, 401, origin);
+  }
+  const { payload, secret: matchedSecret } = verified;
+
+  if (!(await consumeNonceOnce(payload.nonce, payload.ttl))) {
+    flagViolation(ctx, env, ip, now);
+    logGate("token_replay", ip);
+    return json({ error: "token already used" }, 401, origin);
   }
 
   const { text, source, target } = body;
@@ -154,26 +178,27 @@ async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext
   const limit = maxBatchChars(env);
   if (text.length > limit * BATCH_CHARS_TOLERANCE) return json({ error: "payload exceeds maxChars", maxChars: limit }, 413, origin);
 
-  const keyBytes = await deriveChallengeKey(env.WORKER_SECRET, payload.nonce);
-  const expected = await computeAnswer(keyBytes, payload.nonce, text);
+  const probeBitmap = Number(body.probeBitmap);
+  const keyBytes = await deriveChallengeKey(matchedSecret, payload.nonce);
+  const expected = await computeAnswer(keyBytes, payload.nonce, text, probeBitmap);
   if (expected !== body.answer) {
     flagViolation(ctx, env, ip, now);
     logGate("turnstile_triggered", ip, { reason: "challenge_mismatch" });
     return json({ error: "challenge mismatch" }, 403, origin);
   }
 
-  const cleared = await verifyClearance(env.WORKER_SECRET, body.clearance);
+  const cleared = await verifyClearance(ring, body.clearance);
   if (!cleared) {
     if (gate.requireClearance) {
       logGate("turnstile_triggered", ip, { reason: "quarantine" });
       return json({ error: "quarantine active", trigger_turnstile: true }, 429, origin);
     }
-    if (body.envScore !== PROBE_EXPECTED_SCORE) {
-      logGate("turnstile_triggered", ip, { reason: "env_check_failed", envScore: body.envScore });
+    if (!probeBitmapValid(payload.nonce, probeBitmap)) {
+      logGate("turnstile_triggered", ip, { reason: "env_check_failed" });
       return json({ error: "environment check failed", trigger_turnstile: true }, 429, origin);
     }
     try {
-      const success = await consumeRateLimit(env, ip, text.length);
+      const success = await consumeRateLimit(env, ip, text.length, gate.degraded);
       if (!success) {
         logGate("turnstile_triggered", ip, { reason: "rate_limited" });
         return json({ error: "rate_limited", trigger_turnstile: true }, 429, origin);
@@ -182,7 +207,7 @@ async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext
       reportError("rate limiter unavailable, failing open", e);
     }
     if (gate.quarantined) {
-      ctx.waitUntil(consumeFreeQuota(env.DB, ip, now).catch((e) => reportError("consumeFreeQuota failed", e)));
+      ctx.waitUntil(consumeFreeQuota(env.DB, ip, now).catch((e) => logGate("d1_write_failed", ip, { op: "consumeFreeQuota", message: String(e) })));
     }
   }
 
@@ -203,7 +228,7 @@ async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext
   if (typeof translatedHtml !== "string") return json({ error: "unexpected upstream response shape" }, 502, origin);
 
   reportPending(ctx, env, body.pendingSuccess);
-  const { token, challengeKey, nonce } = await issueSession(env.WORKER_SECRET, ACTIVE_TTL_MS);
+  const { token, challengeKey, nonce } = await issueSession(ring, ACTIVE_TTL_MS);
   return json({ translatedHtml, token, challengeKey, nonce, maxChars: limit }, 200, origin);
 }
 
@@ -221,10 +246,33 @@ async function handleTurnstile(request: Request, env: Env, ctx: ExecutionContext
   ctx.waitUntil(
     recordCaptchaSolved(env.DB, ip, Date.now())
       .then((escalated) => { if (escalated) logGate("ip_escalated", ip, { reason: "daily_captcha_cap" }); })
-      .catch((e) => reportError("recordCaptchaSolved failed", e))
+      .catch((e) => logGate("d1_write_failed", ip, { op: "recordCaptchaSolved", message: String(e) }))
   );
-  const clearance = await issueClearance(env.WORKER_SECRET);
+  const ring = await resolveSecretRing(env.WORKER_SECRET, env.WORKER_SALT || "");
+  const clearance = await issueClearance(ring);
   return json({ clearance }, 200, origin);
+}
+
+async function rotateSecret(env: Env): Promise<void> {
+  if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID) {
+    console.error("secret rotation skipped: CF_API_TOKEN/CF_ACCOUNT_ID not configured");
+    return;
+  }
+  const raw = nextRingText(env.WORKER_SECRET);
+  const response = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/workers/scripts/${SCRIPT_NAME}/secrets`,
+    {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${env.CF_API_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "WORKER_SECRET", text: raw, type: "secret_text" }),
+    }
+  );
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    console.error(`secret rotation failed: ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`);
+    return;
+  }
+  console.log(JSON.stringify({ event: "secret_rotated", ts: Date.now() }));
 }
 
 export default {
@@ -250,7 +298,11 @@ export default {
     }
   },
 
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (event.cron === ROTATION_CRON) {
+      ctx.waitUntil(rotateSecret(env));
+      return;
+    }
     ctx.waitUntil(pruneReputation(env.DB));
   },
 };

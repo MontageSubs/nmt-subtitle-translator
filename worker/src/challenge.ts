@@ -1,7 +1,6 @@
 import { hmacRaw } from "./crypto";
 
 const KEY_CONTEXT = "nmt-challenge";
-const ANSWER_MODULUS = 1_000_000;
 
 export async function deriveChallengeKey(secret: string, nonce: number): Promise<Uint8Array> {
   return hmacRaw(secret, `${KEY_CONTEXT}:${nonce}`);
@@ -10,10 +9,9 @@ export async function deriveChallengeKey(secret: string, nonce: number): Promise
 async function signWithKey(keyBytes: Uint8Array, message: string): Promise<number> {
   const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
-  return new DataView(signature).getUint32(0) % ANSWER_MODULUS;
+  return new DataView(signature).getUint32(0);
 }
 
-export function computeAnswer(keyBytes: Uint8Array, nonce: number, text: string): Promise<number> {
-  return signWithKey(keyBytes, `${nonce}:${text}`);
+export function computeAnswer(keyBytes: Uint8Array, nonce: number, text: string, probeBitmap: number): Promise<number> {
+  return signWithKey(keyBytes, `${nonce}:${probeBitmap}:${text}`);
 }
-

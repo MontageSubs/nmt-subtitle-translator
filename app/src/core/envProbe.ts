@@ -1,6 +1,3 @@
-const PROBE_POOL_SIZE = 6;
-const PROBE_REQUIRED = 4;
-
 type Probe = () => boolean;
 
 const pool: Probe[] = [
@@ -12,11 +9,6 @@ const pool: Probe[] = [
   () => typeof performance?.now === "function" && typeof performance.now() === "number",
 ];
 
-function requiredProbeIndices(nonce: number): number[] {
-  const start = nonce % PROBE_POOL_SIZE;
-  return Array.from({ length: PROBE_REQUIRED }, (_, i) => (start + i) % PROBE_POOL_SIZE);
-}
-
-export function computeEnvScore(nonce: number): number {
-  return requiredProbeIndices(nonce).reduce((sum, index) => sum + (pool[index]() ? 1 : 0), 0);
+export function computeProbeBitmap(): number {
+  return pool.reduce((bitmap, probe, index) => (probe() ? bitmap | (1 << index) : bitmap), 0);
 }
