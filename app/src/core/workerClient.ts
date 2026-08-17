@@ -145,6 +145,7 @@ async function resolveTurnstile(): Promise<void> {
   if (!container) throw new WorkerRequestError("触发限流，但页面缺少 #turnstile-container", false);
 
   container.hidden = false;
+  container.innerHTML = "";
   const turnstileToken = await new Promise<string>((resolve, reject) => {
     window.turnstile!.render(container, {
       sitekey: TURNSTILE_SITE_KEY,
@@ -200,12 +201,23 @@ async function attemptTranslateBatch(htmls: string[], source: string, target: st
   return { results: payload.results, maxChars: payload.maxChars || active.maxChars };
 }
 
-async function withTurnstileRetry<T>(attempt: () => Promise<T>): Promise<T> {
+const RATE_LIMIT_BACKOFF_MS = 4_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRetry<T>(attempt: () => Promise<T>): Promise<T> {
   try {
     return await attempt();
   } catch (e) {
-    if (e instanceof WorkerRequestError && e.triggerTurnstile) {
+    if (!(e instanceof WorkerRequestError)) throw e;
+    if (e.triggerTurnstile) {
       await resolveTurnstile();
+      return attempt();
+    }
+    if (e.retryable) {
+      await sleep(RATE_LIMIT_BACKOFF_MS);
       return attempt();
     }
     throw e;
@@ -213,9 +225,9 @@ async function withTurnstileRetry<T>(attempt: () => Promise<T>): Promise<T> {
 }
 
 export function postTranslateHtml(text: string, source: string, target: string): Promise<{ translatedHtml: string; maxChars: number }> {
-  return withTurnstileRetry(() => attemptTranslate(text, source, target));
+  return withRetry(() => attemptTranslate(text, source, target));
 }
 
 export function postTranslateBatch(htmls: string[], source: string, target: string): Promise<(string | null)[]> {
-  return withTurnstileRetry(() => attemptTranslateBatch(htmls, source, target)).then((r) => r.results);
+  return withRetry(() => attemptTranslateBatch(htmls, source, target)).then((r) => r.results);
 }

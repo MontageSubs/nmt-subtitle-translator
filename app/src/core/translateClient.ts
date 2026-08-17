@@ -269,7 +269,7 @@ async function translate(
 
   if (missing.length) {
     const missingCues = [...new Set(missing.map(cueRef))].sort();
-    log(`retry round: resending ${missing.length} missing unit(s) in one merged request, cues: ${missingCues.join(", ")}`);
+    log(`retry round: resending ${missing.length} missing unit(s) individually, cues: ${missingCues.join(", ")}`);
     const missingSet = new Set(missing);
     const filteredGroups = chapterGroups.map((g) => g.filter((id) => missingSet.has(id))).filter((g) => g.length);
     const filteredItems = items.filter((i) => missingSet.has(i.id));

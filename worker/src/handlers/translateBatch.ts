@@ -91,8 +91,8 @@ export async function handleTranslateBatch(request: Request, env: Env, ctx: Exec
   try {
     const success = await consumeRateLimit(env, ip, totalChars, gate.degraded);
     if (!success) {
-      logGate("turnstile_triggered", ip, { reason: "rate_limited" });
-      return json({ error: "rate_limited", trigger_turnstile: true }, 429, origin, env);
+      logGate("rate_limited", ip, { cleared });
+      return json({ error: "rate_limited", trigger_turnstile: !cleared }, 429, origin, env);
     }
   } catch (e) {
     reportError("rate limiter unavailable, failing open", e);
