@@ -41,9 +41,10 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 
 # 两条定时任务，按 cron 表达式在 index.ts 的 scheduled() 内分派：
 #   17 3 * * *  每日清理过期黑名单记录，保持表体积恒定
-#   0  4 * * 0  每周日密钥自轮换（见下方 WORKER_SECRET 说明），修改本行需同步改 index.ts 的 ROTATION_CRON 常量
+#   0  4 * * 7  每周日密钥自轮换（见下方 WORKER_SECRET 说明），修改本行需同步改 index.ts 的 ROTATION_CRON 常量
+#   注：Cloudflare 的 Cron Triggers 星期字段不接受 0，周日必须写 7（1=周一...7=周日）
 [triggers]
-crons = ["17 3 * * *", "0 4 * * 0"]
+crons = ["17 3 * * *", "0 4 * * 7"]
 
 # 以下均通过 GitHub 仓库 Settings → Secrets and variables → Actions → Secrets 配置，
 # 由 deploy-worker.yml 在每次部署时自动 `wrangler secret put` 下发，不写入本文件：

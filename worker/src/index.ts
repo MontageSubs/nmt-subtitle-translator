@@ -38,7 +38,7 @@ const BATCH_CHARS_TOLERANCE = 1.1;
 const PREFLIGHT_MAX_AGE = "7200";
 const DEGRADED_RATE_LIMIT_MULTIPLIER = 4;
 const SCRIPT_NAME = "nmt-relay";
-const ROTATION_CRON = "0 4 * * 0";
+const ROTATION_CRON = "0 4 * * 7";
 
 function corsHeaders(origin: string): HeadersInit {
   return {
