@@ -8,6 +8,7 @@ export interface Env {
   ALLOWED_ORIGIN: string;
   WORKER_SECRET: string;
   WORKER_SALT?: string;
+  IP_HASH_SALT: string;
   MAX_BATCH_CHARS?: string;
   MAX_BATCHES_PER_REQUEST?: string;
   RATE_LIMIT_UNIT_CHARS?: string;
@@ -18,6 +19,7 @@ export interface Env {
   CF_API_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
   RATE_LIMITER: RateLimit;
+  BURST_LIMITER: RateLimit;
   DB: D1Database;
 }
 

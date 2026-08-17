@@ -28,10 +28,21 @@ type = "ratelimit"
 namespace_id = "1001"
 simple = { limit = 600, period = 60 }
 
-# D1 数据库：存两张表——ip_reputation（隔离期/封禁，只有触发违规信号的 IP 才写入）与
-# nonce_guard（每次 /translate 的重放防护，主键唯一约束做全局原子的"写入即消费"，
-# 取代此前按数据中心本地隔离、非全局一致的 Cache API 方案）。两表均由 scheduled() 每日定时清理
-# 过期行，体积恒定。翻译计数走 Turso（见下方 secrets），互不占用彼此配额。
+# 突发探测绑定：与上方 RATE_LIMITER 计费维度不同——不折算字符，每次请求固定消耗 1 hit，
+# 只回答"这个匿名标识短时间内的请求频率是否异常"这一个问题。10 秒 40 次意味着需要持续
+# 超过每秒 4 次才会触顶，正常人工操作（哪怕连续翻译多个文件）不会触发，脚本化连续调用才会。
+# 这是唯一驱动"是否需要人机验证 / 是否升级隔离"的信号源，取代此前"任意一次 token/挑战不匹配
+# 即刻隔离"的做法——隐私政策里"短时间内发起海量请求"对应的正是这里。
+[[unsafe.bindings]]
+name = "BURST_LIMITER"
+type = "ratelimit"
+namespace_id = "1002"
+simple = { limit = 40, period = 10 }
+
+# D1 数据库：存两张表——ip_shield（隔离期/封禁，主键是 IP 的单向哈希，只有触发 BURST_LIMITER
+# 的匿名标识才写入，普通用户不留任何记录）与 nonce_guard（每次 /translate 的重放防护，主键唯一
+# 约束做全局原子的"写入即消费"，取代此前按数据中心本地隔离、非全局一致的 Cache API 方案）。
+# 两表均由 scheduled() 每日定时清理过期行，体积恒定。翻译计数走 Turso（见下方 secrets），互不占用彼此配额。
 # database_id 不写入本文件明文：先执行一次
 #   npx wrangler d1 create nmt-relay
 # 把返回的 id 存进 GitHub Secrets 的 D1_DATABASE_ID，deploy-worker.yml 部署时用 sed 注入替换
@@ -40,9 +51,9 @@ simple = { limit = 600, period = 60 }
 binding = "DB"
 database_name = "nmt-relay"
 database_id = "REPLACE_WITH_D1_DATABASE_ID"
-
 # 两条定时任务，按 cron 表达式在 index.ts 的 scheduled() 内分派：
-#   17 3 * * *  每日清理 ip_reputation 过期记录与 nonce_guard 过期 nonce，保持两表体积恒定
+#   17 3 * * *  每日清理 ip_shield 过期记录与 nonce_guard 过期 nonce，保持两表体积恒定；
+#               首次部署时会自动 DROP 掉旧版本遗留的明文 IP 表 ip_reputation，无需手工迁移
 #   0  4 * * 7  每周日密钥自轮换（见下方 WORKER_SECRET 说明），修改本行需同步改 index.ts 的 ROTATION_CRON 常量
 #   注：Cloudflare 的 Cron Triggers 星期字段不接受 0，周日必须写 7（1=周一...7=周日）
 [triggers]
@@ -55,6 +66,10 @@ crons = ["17 3 * * *", "0 4 * * 7"]
 #   TURNSTILE_SECRET_KEY     Cloudflare Turnstile 后台密钥
 #   GOOGLE_TRANSLATE_API_KEY 可选，未设置时走匿名上游端点
 #   WORKER_SALT              人工设置一次的静态盐，极少变动，与轮换密钥一起派生出实际签名密钥
+#   IP_HASH_SALT             独立静态盐，仅用于把访客 IP 单向哈希成匿名标识（供 D1/限流绑定使用），
+#                            与 WORKER_SALT 用途隔离、互不依赖，设计上长期不轮换——一旦更换，此前
+#                            已写入 ip_shield 的隔离记录会随之失效（等同于对所有历史记录重新洗牌），
+#                            这是可接受的副作用而非需要额外兼容的场景
 #   CF_API_TOKEN             与部署用的 CLOUDFLARE_API_TOKEN 同一个值，额外下发给 Worker 自身，
 #                            供 scheduled() 里的自轮换逻辑调用 Cloudflare 管理 API 改写自己的 secret；
 #                            该 token 需具备 Workers Scripts:Edit 权限——部署流程本就要求这个权限，

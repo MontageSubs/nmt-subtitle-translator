@@ -6,8 +6,9 @@ import { verifyClearance } from "../turnstile";
 import { consumeFreeQuota } from "../reputation";
 import { resolveSecretRing } from "../secret";
 import { consumeNonceOnce } from "../nonce";
+import { hashIp, clientIp } from "../identity";
 import { json, parseBody, logGate, reportError } from "../response";
-import { gateForRequest, flagViolation, consumeRateLimit } from "../gate";
+import { gateForRequest, consumeBurst, escalateOnBurstTrip, consumeRateLimit } from "../gate";
 import { reportPending } from "../stats";
 import { fetchUpstreamTranslation } from "../upstream";
 
@@ -27,26 +28,30 @@ export async function handleTranslate(request: Request, env: Env, ctx: Execution
   const body = await parseBody<TranslateRequestBody>(request);
   if (!body) return json({ error: "malformed JSON" }, 400, origin, env);
 
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  const ipHash = await hashIp(env, clientIp(request));
   const now = Date.now();
 
-  const gate = await gateForRequest(env, ip, now);
+  if (!(await consumeBurst(env, ipHash))) {
+    escalateOnBurstTrip(ctx, env, ipHash, now);
+    logGate("burst_detected", ipHash, { path: "/translate" });
+    return json({ error: "rate_limited", trigger_turnstile: true }, 429, origin, env);
+  }
+
+  const gate = await gateForRequest(env, ipHash, now);
   if (gate.blocked) {
-    logGate("ip_blocked", ip);
+    logGate("ip_blocked", ipHash);
     return json({ error: "too many failed verifications, try again later" }, 403, origin, env);
   }
 
   const ring = await resolveSecretRing(env.WORKER_SECRET, env.WORKER_SALT || "");
   const verified = await verifyToken(ring, body.token || "");
   if (!verified) {
-    flagViolation(ctx, env, ip, now);
     return json({ error: "invalid or expired token" }, 401, origin, env);
   }
   const { payload, secret: matchedSecret } = verified;
 
   if (!(await consumeNonceOnce(env.DB, payload.nonce, now, payload.ttl))) {
-    flagViolation(ctx, env, ip, now);
-    logGate("token_replay", ip);
+    logGate("token_replay", ipHash);
     return json({ error: "token already used" }, 401, origin, env);
   }
 
@@ -60,30 +65,29 @@ export async function handleTranslate(request: Request, env: Env, ctx: Execution
   const keyBytes = await deriveChallengeKey(matchedSecret, payload.nonce);
   const expected = await computeAnswer(keyBytes, payload.nonce, text, probeBitmap);
   if (expected !== body.answer) {
-    flagViolation(ctx, env, ip, now);
-    logGate("turnstile_triggered", ip, { reason: "challenge_mismatch" });
+    logGate("challenge_mismatch", ipHash);
     return json({ error: "challenge mismatch" }, 403, origin, env);
   }
 
   const cleared = await verifyClearance(ring, body.clearance);
   if (!cleared) {
     if (gate.requireClearance) {
-      logGate("turnstile_triggered", ip, { reason: "quarantine" });
+      logGate("turnstile_triggered", ipHash, { reason: "quarantine" });
       return json({ error: "quarantine active", trigger_turnstile: true }, 429, origin, env);
     }
     if (!probeBitmapValid(payload.nonce, probeBitmap)) {
-      logGate("turnstile_triggered", ip, { reason: "env_check_failed" });
+      logGate("turnstile_triggered", ipHash, { reason: "env_check_failed" });
       return json({ error: "environment check failed", trigger_turnstile: true }, 429, origin, env);
     }
     if (gate.quarantined) {
-      ctx.waitUntil(consumeFreeQuota(env.DB, ip, now).catch((e) => logGate("d1_write_failed", ip, { op: "consumeFreeQuota", message: String(e) })));
+      ctx.waitUntil(consumeFreeQuota(env.DB, ipHash, now).catch((e) => logGate("d1_write_failed", ipHash, { op: "consumeFreeQuota", message: String(e) })));
     }
   }
 
   try {
-    const success = cleared || (await consumeRateLimit(env, ip, text.length, gate.degraded));
+    const success = await consumeRateLimit(env, ipHash, text.length, gate.degraded, cleared);
     if (!success) {
-      logGate("rate_limited", ip, { cleared });
+      logGate("rate_limited", ipHash, { cleared });
       return json({ error: "rate_limited", trigger_turnstile: !cleared }, 429, origin, env);
     }
   } catch (e) {
