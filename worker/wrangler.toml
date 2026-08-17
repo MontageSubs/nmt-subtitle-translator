@@ -28,19 +28,21 @@ type = "ratelimit"
 namespace_id = "1001"
 simple = { limit = 600, period = 60 }
 
-# D1 数据库：仅存 IP 黑名单（隔离期/封禁），只有触发违规信号的 IP 才写入，
-# 正常用户请求全程不落库。翻译计数走 Turso（见下方 secrets），两者互不占用彼此配额。
+# D1 数据库：存两张表——ip_reputation（隔离期/封禁，只有触发违规信号的 IP 才写入）与
+# nonce_guard（每次 /translate 的重放防护，主键唯一约束做全局原子的"写入即消费"，
+# 取代此前按数据中心本地隔离、非全局一致的 Cache API 方案）。两表均由 scheduled() 每日定时清理
+# 过期行，体积恒定。翻译计数走 Turso（见下方 secrets），互不占用彼此配额。
 # database_id 不写入本文件明文：先执行一次
 #   npx wrangler d1 create nmt-relay
 # 把返回的 id 存进 GitHub Secrets 的 D1_DATABASE_ID，deploy-worker.yml 部署时用 sed 注入替换
-# 下方占位符，本文件在仓库里始终保持占位符原样。表结构由 reputation.ts 首次调用时自动建立。
+# 下方占位符，本文件在仓库里始终保持占位符原样。表结构由各自模块首次调用时自动建立。
 [[d1_databases]]
 binding = "DB"
 database_name = "nmt-relay"
 database_id = "REPLACE_WITH_D1_DATABASE_ID"
 
 # 两条定时任务，按 cron 表达式在 index.ts 的 scheduled() 内分派：
-#   17 3 * * *  每日清理过期黑名单记录，保持表体积恒定
+#   17 3 * * *  每日清理 ip_reputation 过期记录与 nonce_guard 过期 nonce，保持两表体积恒定
 #   0  4 * * 7  每周日密钥自轮换（见下方 WORKER_SECRET 说明），修改本行需同步改 index.ts 的 ROTATION_CRON 常量
 #   注：Cloudflare 的 Cron Triggers 星期字段不接受 0，周日必须写 7（1=周一...7=周日）
 [triggers]

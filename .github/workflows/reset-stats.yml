@@ -25,7 +25,6 @@ jobs:
         run: |
           set -e
           url="$(echo "$TURSO_URL" | sed -e 's#^libsql://#https://#' -e 's#/*$##')/v2/pipeline"
-          # 建表语句需与 worker/src/turso.ts 的 SCHEMA_STATEMENTS 保持一致
           curl -sf -X POST "$url" \
             -H "Authorization: Bearer $TURSO_AUTH_TOKEN" \
             -H "Content-Type: application/json" \

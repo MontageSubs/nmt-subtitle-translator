@@ -5,7 +5,7 @@ import { verifyTurnstileToken, issueClearance, verifyClearance } from "./turnsti
 import { recordSuccess, readStats, TursoConfig } from "./turso";
 import { checkGate, consumeFreeQuota, recordViolation, recordCaptchaSolved, pruneReputation } from "./reputation";
 import { resolveSecretRing, nextRingText } from "./secret";
-import { consumeNonceOnce } from "./replay";
+import { consumeNonceOnce, pruneNonceGuard } from "./nonce";
 
 export interface RateLimit {
   limit(options: { key: string }): Promise<{ success: boolean }>;
@@ -50,8 +50,22 @@ function corsHeaders(origin: string): HeadersInit {
   };
 }
 
-function json(body: unknown, status: number, origin: string): Response {
-  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...corsHeaders(origin) } });
+const MIN_AUDITED_SECRET_LENGTH = 8;
+
+function auditedSecrets(env: Env): string[] {
+  return [
+    env.WORKER_SALT, env.TURSO_AUTH_TOKEN, env.TURNSTILE_SECRET_KEY, env.GOOGLE_TRANSLATE_API_KEY,
+    env.CF_API_TOKEN, env.CF_ACCOUNT_ID, env.TURSO_URL, ...(env.WORKER_SECRET || "").split("\n"),
+  ].filter((value): value is string => typeof value === "string" && value.trim().length >= MIN_AUDITED_SECRET_LENGTH);
+}
+
+function json(body: unknown, status: number, origin: string, env: Env): Response {
+  const serialized = JSON.stringify(body);
+  if (auditedSecrets(env).some((secret) => serialized.includes(secret))) {
+    console.error(JSON.stringify({ event: "output_blocked", ts: Date.now() }));
+    return new Response(JSON.stringify({ error: "output_blocked" }), { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders(origin) } });
+  }
+  return new Response(serialized, { status, headers: { "Content-Type": "application/json", ...corsHeaders(origin) } });
 }
 
 async function parseBody<T>(request: Request): Promise<T | null> {
@@ -131,7 +145,7 @@ async function handleHandshake(request: Request, env: Env, ctx: ExecutionContext
   reportPending(ctx, env, body.pendingSuccess);
   const ring = await resolveSecretRing(env.WORKER_SECRET, env.WORKER_SALT || "");
   const [{ token, challengeKey, nonce }, stats] = await Promise.all([issueSession(ring, STANDBY_TTL_MS), loadStats(env)]);
-  return json({ token, challengeKey, nonce, maxChars: maxBatchChars(env), stats }, 200, origin);
+  return json({ token, challengeKey, nonce, maxChars: maxBatchChars(env), stats }, 200, origin, env);
 }
 
 interface TranslateRequestBody {
@@ -147,7 +161,7 @@ interface TranslateRequestBody {
 
 async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
   const body = await parseBody<TranslateRequestBody>(request);
-  if (!body) return json({ error: "malformed JSON" }, 400, origin);
+  if (!body) return json({ error: "malformed JSON" }, 400, origin, env);
 
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
   const now = Date.now();
@@ -155,28 +169,28 @@ async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext
   const gate = await gateForRequest(env, ip, now);
   if (gate.blocked) {
     logGate("ip_blocked", ip);
-    return json({ error: "too many failed verifications, try again later" }, 403, origin);
+    return json({ error: "too many failed verifications, try again later" }, 403, origin, env);
   }
 
   const ring = await resolveSecretRing(env.WORKER_SECRET, env.WORKER_SALT || "");
   const verified = await verifyToken(ring, body.token || "");
   if (!verified) {
     flagViolation(ctx, env, ip, now);
-    return json({ error: "invalid or expired token" }, 401, origin);
+    return json({ error: "invalid or expired token" }, 401, origin, env);
   }
   const { payload, secret: matchedSecret } = verified;
 
-  if (!(await consumeNonceOnce(payload.nonce, payload.ttl))) {
+  if (!(await consumeNonceOnce(env.DB, payload.nonce, now, payload.ttl))) {
     flagViolation(ctx, env, ip, now);
     logGate("token_replay", ip);
-    return json({ error: "token already used" }, 401, origin);
+    return json({ error: "token already used" }, 401, origin, env);
   }
 
   const { text, source, target } = body;
-  if (!text || !source || !target) return json({ error: "invalid translate request" }, 400, origin);
+  if (!text || !source || !target) return json({ error: "invalid translate request" }, 400, origin, env);
 
   const limit = maxBatchChars(env);
-  if (text.length > limit * BATCH_CHARS_TOLERANCE) return json({ error: "payload exceeds maxChars", maxChars: limit }, 413, origin);
+  if (text.length > limit * BATCH_CHARS_TOLERANCE) return json({ error: "payload exceeds maxChars", maxChars: limit }, 413, origin, env);
 
   const probeBitmap = Number(body.probeBitmap);
   const keyBytes = await deriveChallengeKey(matchedSecret, payload.nonce);
@@ -184,31 +198,32 @@ async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext
   if (expected !== body.answer) {
     flagViolation(ctx, env, ip, now);
     logGate("turnstile_triggered", ip, { reason: "challenge_mismatch" });
-    return json({ error: "challenge mismatch" }, 403, origin);
+    return json({ error: "challenge mismatch" }, 403, origin, env);
   }
 
   const cleared = await verifyClearance(ring, body.clearance);
   if (!cleared) {
     if (gate.requireClearance) {
       logGate("turnstile_triggered", ip, { reason: "quarantine" });
-      return json({ error: "quarantine active", trigger_turnstile: true }, 429, origin);
+      return json({ error: "quarantine active", trigger_turnstile: true }, 429, origin, env);
     }
     if (!probeBitmapValid(payload.nonce, probeBitmap)) {
       logGate("turnstile_triggered", ip, { reason: "env_check_failed" });
-      return json({ error: "environment check failed", trigger_turnstile: true }, 429, origin);
-    }
-    try {
-      const success = await consumeRateLimit(env, ip, text.length, gate.degraded);
-      if (!success) {
-        logGate("turnstile_triggered", ip, { reason: "rate_limited" });
-        return json({ error: "rate_limited", trigger_turnstile: true }, 429, origin);
-      }
-    } catch (e) {
-      reportError("rate limiter unavailable, failing open", e);
+      return json({ error: "environment check failed", trigger_turnstile: true }, 429, origin, env);
     }
     if (gate.quarantined) {
       ctx.waitUntil(consumeFreeQuota(env.DB, ip, now).catch((e) => logGate("d1_write_failed", ip, { op: "consumeFreeQuota", message: String(e) })));
     }
+  }
+
+  try {
+    const success = await consumeRateLimit(env, ip, text.length, gate.degraded);
+    if (!success) {
+      logGate("turnstile_triggered", ip, { reason: "rate_limited" });
+      return json({ error: "rate_limited", trigger_turnstile: true }, 429, origin, env);
+    }
+  } catch (e) {
+    reportError("rate limiter unavailable, failing open", e);
   }
 
   const headers = new Headers({ "Content-Type": "application/json+protobuf", "User-Agent": FALLBACK_USER_AGENT });
@@ -221,27 +236,27 @@ async function handleTranslate(request: Request, env: Env, ctx: ExecutionContext
   const upstreamResponse = await fetch(upstreamUrl.toString(), {
     method: "POST", headers, body: JSON.stringify([[[text], source, target], "te"]),
   });
-  if (!upstreamResponse.ok) return json({ error: `upstream ${upstreamResponse.status}` }, 502, origin);
+  if (!upstreamResponse.ok) return json({ error: `upstream ${upstreamResponse.status}` }, 502, origin, env);
 
   const upstreamPayload = (await upstreamResponse.json().catch(() => null)) as unknown;
   const translatedHtml = Array.isArray(upstreamPayload) ? (upstreamPayload as any)?.[0]?.[0] : undefined;
-  if (typeof translatedHtml !== "string") return json({ error: "unexpected upstream response shape" }, 502, origin);
+  if (typeof translatedHtml !== "string") return json({ error: "unexpected upstream response shape" }, 502, origin, env);
 
   reportPending(ctx, env, body.pendingSuccess);
   const { token, challengeKey, nonce } = await issueSession(ring, ACTIVE_TTL_MS);
-  return json({ translatedHtml, token, challengeKey, nonce, maxChars: limit }, 200, origin);
+  return json({ translatedHtml, token, challengeKey, nonce, maxChars: limit }, 200, origin, env);
 }
 
 async function handleTurnstile(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
-  if (!env.TURNSTILE_SECRET_KEY) return json({ error: "turnstile not configured" }, 501, origin);
+  if (!env.TURNSTILE_SECRET_KEY) return json({ error: "turnstile not configured" }, 501, origin, env);
   const body = await parseBody<{ turnstileToken?: string }>(request);
-  if (!body?.turnstileToken) return json({ error: "missing turnstileToken" }, 400, origin);
+  if (!body?.turnstileToken) return json({ error: "missing turnstileToken" }, 400, origin, env);
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
   const ok = await verifyTurnstileToken(env.TURNSTILE_SECRET_KEY, body.turnstileToken, ip);
   if (!ok) {
     flagViolation(ctx, env, ip, Date.now());
     logGate("turnstile_verify_failed", ip);
-    return json({ error: "turnstile verification failed" }, 403, origin);
+    return json({ error: "turnstile verification failed" }, 403, origin, env);
   }
   ctx.waitUntil(
     recordCaptchaSolved(env.DB, ip, Date.now())
@@ -250,7 +265,7 @@ async function handleTurnstile(request: Request, env: Env, ctx: ExecutionContext
   );
   const ring = await resolveSecretRing(env.WORKER_SECRET, env.WORKER_SALT || "");
   const clearance = await issueClearance(ring);
-  return json({ clearance }, 200, origin);
+  return json({ clearance }, 200, origin, env);
 }
 
 async function rotateSecret(env: Env): Promise<void> {
@@ -285,16 +300,16 @@ export default {
         return allowed ? new Response(null, { status: 204, headers: corsHeaders(origin) }) : new Response(null, { status: 403 });
       }
       if (!allowed) return new Response(JSON.stringify({ error: "origin not allowed" }), { status: 403, headers: { "Content-Type": "application/json" } });
-      if (request.method !== "POST") return json({ error: "not found" }, 404, origin);
-      if (!env.WORKER_SECRET) return json({ error: "worker misconfigured: WORKER_SECRET is not set" }, 500, origin);
+      if (request.method !== "POST") return json({ error: "not found" }, 404, origin, env);
+      if (!env.WORKER_SECRET) return json({ error: "worker misconfigured: WORKER_SECRET is not set" }, 500, origin, env);
 
       const path = new URL(request.url).pathname;
       if (path === "/handshake") return await handleHandshake(request, env, ctx, origin);
       if (path === "/translate") return await handleTranslate(request, env, ctx, origin);
       if (path === "/turnstile") return await handleTurnstile(request, env, ctx, origin);
-      return json({ error: "not found" }, 404, origin);
+      return json({ error: "not found" }, 404, origin, env);
     } catch (e) {
-      return json({ error: `internal error: ${e instanceof Error ? e.message : String(e)}` }, 500, origin);
+      return json({ error: `internal error: ${e instanceof Error ? e.message : String(e)}` }, 500, origin, env);
     }
   },
 
@@ -303,6 +318,6 @@ export default {
       ctx.waitUntil(rotateSecret(env));
       return;
     }
-    ctx.waitUntil(pruneReputation(env.DB));
+    ctx.waitUntil(Promise.all([pruneReputation(env.DB), pruneNonceGuard(env.DB)]));
   },
 };

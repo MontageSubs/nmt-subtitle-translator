@@ -1,5 +1,5 @@
 import { Unit, Chapter, Cue, ProgressEvent } from "./types";
-import { postTranslateHtml, getMaxChars } from "./workerClient";
+import { postTranslateHtml, getMaxChars, WorkerRequestError } from "./workerClient";
 import { uiLog } from "./uiLog";
 
 const GROUP_MARKER_PATTERN = /\u27e6g([^\u27e6\u27e7]+)\u27e7/g;
@@ -169,6 +169,10 @@ async function sendHtml(html: string, sourceLang: string, targetLang: string): P
   return translatedHtml;
 }
 
+function rethrowIfFatal(e: unknown): void {
+  if (e instanceof WorkerRequestError && e.fatal) throw e;
+}
+
 async function sendBatch(batch: Item[][], sourceLang: string, targetLang: string): Promise<Map<string, string>> {
   const items = batch.flat();
   const indices = new Map(items.map((item, i) => [item.id, i + 1]));
@@ -179,6 +183,7 @@ async function sendBatch(batch: Item[][], sourceLang: string, targetLang: string
   try {
     translatedHtml = await sendHtml(html, sourceLang, targetLang);
   } catch (e) {
+    rethrowIfFatal(e);
     log(`batch request failed: ${e}`);
     return new Map();
   }
@@ -461,6 +466,7 @@ async function retryIsolatedCuesMerged(
   try {
     translatedHtml = await sendHtml(html, sourceLang, targetLang);
   } catch (e) {
+    rethrowIfFatal(e);
     log(`isolated cue retry failed: ${e}`);
     return new Map();
   }

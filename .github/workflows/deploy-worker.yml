@@ -62,9 +62,6 @@ jobs:
           CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -e
-          # WORKER_SECRET 不在此处同步、也从不出现在任何 GitHub Secret 里：其 Cloudflare 侧值是
-          # 多行环形结构，由 Worker 自身的 scheduled() 每周自轮换（见 wrangler.toml 注释），
-          # 部署流程若在此覆盖会清空宽限期内的"上一个密钥"，破坏轮换的平滑切换。
           for name in TURNSTILE_SECRET_KEY TURSO_URL TURSO_AUTH_TOKEN GOOGLE_TRANSLATE_API_KEY WORKER_SALT CF_API_TOKEN CF_ACCOUNT_ID; do
             value="${!name}"
             if [ -n "$value" ]; then

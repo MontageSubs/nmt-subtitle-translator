@@ -20,7 +20,7 @@ interface Session {
 }
 
 export class WorkerRequestError extends Error {
-  constructor(message: string, public readonly retryable: boolean, public readonly triggerTurnstile = false) {
+  constructor(message: string, public readonly retryable: boolean, public readonly triggerTurnstile = false, public readonly fatal = false) {
     super(message);
   }
 }
@@ -59,8 +59,10 @@ async function request(path: string, body: unknown): Promise<any> {
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const retryable = response.status === 429 || response.status >= 500;
-      throw new WorkerRequestError(payload?.error || `worker responded ${response.status}`, retryable, Boolean(payload?.trigger_turnstile));
+      const fatal = payload?.error === "output_blocked";
+      const retryable = !fatal && (response.status === 429 || response.status >= 500);
+      const message = fatal ? "响应内容安全校验未通过，任务已中止" : payload?.error || `worker responded ${response.status}`;
+      throw new WorkerRequestError(message, retryable, Boolean(payload?.trigger_turnstile), fatal);
     }
     return payload;
   } finally {
