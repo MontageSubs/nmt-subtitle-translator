@@ -201,23 +201,46 @@ async function attemptTranslateBatch(htmls: string[], source: string, target: st
   return { results: payload.results, maxChars: payload.maxChars || active.maxChars };
 }
 
-const RATE_LIMIT_BACKOFF_MS = 4_000;
+const RATE_LIMIT_BASE_BACKOFF_MS = 5_000;
+const RATE_LIMIT_MAX_BACKOFF_MS = 60_000;
+
+let rateLimitedUntil = 0;
+let rateLimitBackoffMs = RATE_LIMIT_BASE_BACKOFF_MS;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForRateLimitCooldown(): Promise<void> {
+  const remaining = rateLimitedUntil - Date.now();
+  if (remaining > 0) await sleep(remaining);
+}
+
+function noteRateLimited(): void {
+  rateLimitedUntil = Date.now() + rateLimitBackoffMs;
+  rateLimitBackoffMs = Math.min(rateLimitBackoffMs * 2, RATE_LIMIT_MAX_BACKOFF_MS);
+}
+
+function noteRateLimitCleared(): void {
+  rateLimitBackoffMs = RATE_LIMIT_BASE_BACKOFF_MS;
+}
+
 async function withRetry<T>(attempt: () => Promise<T>): Promise<T> {
+  await waitForRateLimitCooldown();
   try {
-    return await attempt();
+    const result = await attempt();
+    noteRateLimitCleared();
+    return result;
   } catch (e) {
     if (!(e instanceof WorkerRequestError)) throw e;
     if (e.triggerTurnstile) {
       await resolveTurnstile();
+      await waitForRateLimitCooldown();
       return attempt();
     }
     if (e.retryable) {
-      await sleep(RATE_LIMIT_BACKOFF_MS);
+      noteRateLimited();
+      await waitForRateLimitCooldown();
       return attempt();
     }
     throw e;
