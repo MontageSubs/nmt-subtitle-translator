@@ -1,4 +1,4 @@
-import { Env, ACTIVE_TTL_MS, BATCH_CHARS_TOLERANCE, maxBatchChars } from "../env";
+import { Env, ACTIVE_TTL_MS, maxBatchChars, maxContentChars } from "../env";
 import { issueSession, verifyToken } from "../token";
 import { computeAnswer, deriveChallengeKey } from "../challenge";
 import { probeBitmapValid } from "../envProbe";
@@ -75,9 +75,9 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
     return json({ error: "invalid translate-job request" }, 400, origin, env);
   }
 
-  const limit = maxBatchChars(env);
-  if (content.length > limit * BATCH_CHARS_TOLERANCE) {
-    return json({ error: "payload exceeds maxChars", maxChars: limit }, 413, origin, env);
+  const contentLimit = maxContentChars(env);
+  if (content.length > contentLimit) {
+    return json({ error: "payload exceeds maxContentChars", maxContentChars: contentLimit }, 413, origin, env);
   }
 
   const probeBitmap = Number(body.probeBitmap);
@@ -115,7 +115,7 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
 
   let job: Awaited<ReturnType<typeof runTranslateJob>>;
   try {
-    job = await runTranslateJob(env, { content, glossary, source, target }, limit, startedAt);
+    job = await runTranslateJob(env, { content, glossary, source, target, stripSdhEnabled, sceneChangeSeconds }, maxBatchChars(env), startedAt);
   } catch (e) {
     reportError("translate job failed", e);
     return json({ error: "translate job failed" }, 502, origin, env);
@@ -123,5 +123,5 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
 
   reportPending(ctx, env, body.pendingSuccess);
   const { token, challengeKey, nonce } = await issueSession(ring, ACTIVE_TTL_MS);
-  return json({ ...job, token, challengeKey, nonce, maxChars: limit }, 200, origin, env);
+  return json({ ...job, token, challengeKey, nonce }, 200, origin, env);
 }

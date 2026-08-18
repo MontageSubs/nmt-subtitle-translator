@@ -12,7 +12,12 @@ enabled = true
 # 允许发起请求的静态站点 Origin，只到域名这一级，不含子路径
 [vars]
 ALLOWED_ORIGIN = "https://subs.js.org"
+# 单次上游翻译调用的分片打包上限（字符），完全是 Worker 内部 extract→分批→翻译 环节的实现细节，
+# 前端不需要也不应该感知这个数字。
 MAX_BATCH_CHARS = "8000"
+# 单次 /translate-job 请求允许携带的整份字幕内容上限（字符），只是防滥用的粗粒度上限，
+# 与上面的 MAX_BATCH_CHARS 无关——一份完整电影字幕常见体量在几万字符，此处留了充分余量。
+MAX_CONTENT_CHARS = "200000"
 # 限流最小计费单位（字符），单次 /translate 按 ceil(字符数/该值) 计入下方 RATE_LIMITER 的 hits，
 # 使限流天然按字符总量计费而非请求次数，任务内分片越多不代表限得越紧。
 RATE_LIMIT_UNIT_CHARS = "500"

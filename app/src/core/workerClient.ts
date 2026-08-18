@@ -268,7 +268,6 @@ export interface TranslateJobResponse {
   approx_splits: { unit_id: number; cues: number[]; method: string }[];
   missing_count: number;
   missing_cues: number[];
-  maxChars: number;
 }
 
 export function postTranslateJob(job: TranslateJobPayload): Promise<TranslateJobResponse> {
