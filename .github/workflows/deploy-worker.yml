@@ -48,6 +48,9 @@ jobs:
           fi
           sed -i "s/REPLACE_WITH_D1_DATABASE_ID/$D1_DATABASE_ID/" wrangler.toml
 
+      - name: Apply D1 migrations
+        run: npx wrangler d1 migrations apply nmt-relay --remote
+
       - name: Deploy
         run: npx wrangler deploy
 

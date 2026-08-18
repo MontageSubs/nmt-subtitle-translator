@@ -22,22 +22,6 @@ const DAILY_CAPTCHA_CAP = 30;
 const BLOCK_DURATION_MS = DAY_MS;
 const REPUTATION_RETENTION_MS = QUARANTINE_MAX_DAYS * DAY_MS;
 
-const DROP_LEGACY_TABLE = `DROP TABLE IF EXISTS ip_reputation`;
-const ENSURE_SCHEMA = `CREATE TABLE IF NOT EXISTS ip_shield (
-  ip_hash TEXT PRIMARY KEY,
-  quarantine_until INTEGER NOT NULL DEFAULT 0,
-  quarantine_days INTEGER NOT NULL DEFAULT 0,
-  blocked_until INTEGER NOT NULL DEFAULT 0,
-  day_bucket INTEGER NOT NULL DEFAULT 0,
-  free_used INTEGER NOT NULL DEFAULT 0,
-  captcha_count INTEGER NOT NULL DEFAULT 0,
-  updated_at INTEGER NOT NULL
-)`;
-
-async function ensureSchema(db: D1Database): Promise<void> {
-  await db.batch([db.prepare(DROP_LEGACY_TABLE), db.prepare(ENSURE_SCHEMA)]);
-}
-
 function dayBucket(ts: number): number {
   return Math.floor(ts / DAY_MS);
 }
@@ -47,7 +31,6 @@ function nextEscalationDays(previousDays: number): number {
 }
 
 async function loadRow(db: D1Database, ipHash: string): Promise<ReputationRow | null> {
-  await ensureSchema(db);
   return db.prepare(
     "SELECT quarantine_until, quarantine_days, blocked_until, day_bucket, free_used, captcha_count FROM ip_shield WHERE ip_hash = ?"
   ).bind(ipHash).first<ReputationRow>();
@@ -65,7 +48,6 @@ export async function checkGate(db: D1Database, ipHash: string, now: number): Pr
 }
 
 export async function consumeFreeQuota(db: D1Database, ipHash: string, now: number): Promise<void> {
-  await ensureSchema(db);
   await db.prepare(
     `UPDATE ip_shield SET
        free_used = CASE WHEN day_bucket = ?2 THEN free_used + 1 ELSE 1 END,
