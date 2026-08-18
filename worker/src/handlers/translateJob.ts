@@ -27,9 +27,14 @@ interface TranslateJobRequestBody {
   probeBitmap?: number;
 }
 
+const MAX_GLOSSARY_ENTRIES = 500;
+const MAX_GLOSSARY_ENTRY_CHARS = 200;
+
 function isValidGlossary(value: unknown): value is Glossary {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
-    && Object.entries(value as Record<string, unknown>).every(([k, v]) => typeof k === "string" && typeof v === "string");
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > MAX_GLOSSARY_ENTRIES) return false;
+  return entries.every(([k, v]) => typeof k === "string" && typeof v === "string" && k.length <= MAX_GLOSSARY_ENTRY_CHARS && v.length <= MAX_GLOSSARY_ENTRY_CHARS);
 }
 
 export async function handleTranslateJob(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
