@@ -2,6 +2,7 @@ import { Env } from "./env";
 import { json, corsHeaders } from "./response";
 import { pruneReputation } from "./reputation";
 import { pruneNonceGuard } from "./nonce";
+import { pruneRetryTokenGuard } from "./retryTokenGuard";
 import { rotateSecret, ROTATION_CRON } from "./rotate";
 import { handleHandshake } from "./handlers/handshake";
 import { handleTranslate } from "./handlers/translate";
@@ -37,6 +38,6 @@ export default {
       ctx.waitUntil(rotateSecret(env));
       return;
     }
-    ctx.waitUntil(Promise.all([pruneReputation(env.DB), pruneNonceGuard(env.DB)]));
+    ctx.waitUntil(Promise.all([pruneReputation(env.DB), pruneNonceGuard(env.DB), pruneRetryTokenGuard(env.DB)]));
   },
 };

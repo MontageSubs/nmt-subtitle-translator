@@ -39,7 +39,12 @@ body {
 
 .shell { max-width: 760px; margin: 0 auto; padding: 40px 20px 80px; }
 
-.shell__header h1 { font-size: 1.6rem; margin: 0 0 6px; letter-spacing: -0.01em; }
+.shell__header { position: relative; }
+.locale-switch { position: absolute; top: 0; right: 0; display: flex; gap: 6px; }
+.locale-switch .secondary { padding: 5px 12px; font-size: 0.78rem; }
+.secondary--active { border-color: var(--accent); color: var(--accent); }
+
+.shell__header h1 { font-size: 1.6rem; margin: 0 0 6px; letter-spacing: -0.01em; padding-right: 100px; }
 .brand-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -138,8 +143,12 @@ select:focus, input:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .switch input:checked + .switch__track::after { transform: translateX(18px); }
 
 .slider-field input[type="range"] { width: 100%; accent-color: var(--accent); }
-.slider-field__row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
-.slider-field__value { font-family: var(--mono); font-size: 0.85rem; color: var(--accent); }
+.slider-field__row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.slider-field__number {
+  width: 84px; text-align: right;
+  font-family: var(--mono); font-size: 0.85rem; color: var(--accent);
+  padding: 3px 8px;
+}
 .slider-field__hint { color: var(--muted); font-size: 0.78rem; margin-top: 6px; line-height: 1.5; }
 
 .glossary__toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }

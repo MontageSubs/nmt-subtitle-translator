@@ -10,6 +10,11 @@ export async function hmacHex(secret: string, message: string): Promise<string> 
   return [...(await hmacRaw(secret, message))].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+export async function sha256Hex(message: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(message));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export function base64url(input: string): string {
   return btoa(input).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }

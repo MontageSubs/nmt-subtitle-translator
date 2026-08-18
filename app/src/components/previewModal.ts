@@ -1,3 +1,5 @@
+import { t } from "../i18n";
+
 export interface PreviewCard {
   id: number;
   start: string;
@@ -72,10 +74,10 @@ export function openPreviewModal(rawSrt: string, cards: PreviewCard[]): PreviewM
     <div class="modal">
       <div class="modal__head">
         <div class="modal__tabs">
-          <button type="button" class="modal__tab modal__tab--active" data-tab="raw">原始 SRT</button>
-          <button type="button" class="modal__tab" data-tab="cards">折叠卡片</button>
+          <button type="button" class="modal__tab modal__tab--active" data-tab="raw">${t("preview.tabRaw")}</button>
+          <button type="button" class="modal__tab" data-tab="cards">${t("preview.tabCards")}</button>
         </div>
-        <button type="button" class="modal__close" aria-label="关闭">✕</button>
+        <button type="button" class="modal__close" aria-label="${t("preview.close")}">✕</button>
       </div>
       <div class="modal__body">
         <pre class="preview-raw"></pre>

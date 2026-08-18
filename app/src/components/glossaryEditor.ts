@@ -1,4 +1,5 @@
 import { DictionaryEntry } from "../core/dictionary";
+import { t, onLocaleChange } from "../i18n";
 
 const EMOJI_PATTERN = /\p{Extended_Pictographic}/gu;
 
@@ -18,11 +19,11 @@ export function mountGlossaryEditor(container: HTMLElement, initialEntries: Dict
   function render() {
     container.innerHTML = `
       <div class="glossary__toolbar">
-        <span class="muted">术语表：左原文 → 右译词</span>
-        <button type="button" class="secondary" id="glossary-mode-toggle">${bulkMode ? "切换为逐行编辑" : "切换为整列粘贴"}</button>
+        <span class="muted">${t("glossary.label")}</span>
+        <button type="button" class="secondary" id="glossary-mode-toggle">${bulkMode ? t("glossary.toggleToRows") : t("glossary.toggleToBulk")}</button>
       </div>
       ${bulkMode ? renderBulk() : renderRows()}
-      ${bulkMode ? "" : '<button type="button" class="secondary glossary__add" id="glossary-add-row">+ 添加一行</button>'}
+      ${bulkMode ? "" : `<button type="button" class="secondary glossary__add" id="glossary-add-row">${t("glossary.addRow")}</button>`}
     `;
 
     container.querySelector<HTMLButtonElement>("#glossary-mode-toggle")!.addEventListener("click", () => {
@@ -47,10 +48,10 @@ export function mountGlossaryEditor(container: HTMLElement, initialEntries: Dict
       .map(
         (entry, i) => `
       <div class="glossary__row" data-index="${i}">
-        <input type="text" class="glossary__source" value="${escapeAttr(entry.source)}" placeholder="原文（单行）" />
+        <input type="text" class="glossary__source" value="${escapeAttr(entry.source)}" placeholder="${t("glossary.sourcePlaceholder")}" />
         <span class="glossary__arrow">→</span>
-        <input type="text" class="glossary__target" value="${escapeAttr(entry.target)}" placeholder="译词" />
-        <button type="button" class="glossary__remove" aria-label="删除" data-remove="${i}">✕</button>
+        <input type="text" class="glossary__target" value="${escapeAttr(entry.target)}" placeholder="${t("glossary.targetPlaceholder")}" />
+        <button type="button" class="glossary__remove" aria-label="${t("glossary.remove")}" data-remove="${i}">✕</button>
       </div>`
       )
       .join("")}</div>`;
@@ -60,8 +61,8 @@ export function mountGlossaryEditor(container: HTMLElement, initialEntries: Dict
     const sourceLines = entries.map((e) => e.source).join("\n");
     const targetLines = entries.map((e) => e.target).join("\n");
     return `<div class="glossary__bulk">
-      <textarea id="glossary-bulk-source" placeholder="原文，每行一个">${escapeText(sourceLines)}</textarea>
-      <textarea id="glossary-bulk-target" placeholder="译词，每行一个（与左侧行号一一对应）">${escapeText(targetLines)}</textarea>
+      <textarea id="glossary-bulk-source" placeholder="${t("glossary.bulkSourcePlaceholder")}">${escapeText(sourceLines)}</textarea>
+      <textarea id="glossary-bulk-target" placeholder="${t("glossary.bulkTargetPlaceholder")}">${escapeText(targetLines)}</textarea>
     </div>`;
   }
 
@@ -122,6 +123,7 @@ export function mountGlossaryEditor(container: HTMLElement, initialEntries: Dict
   }
 
   render();
+  onLocaleChange(() => render());
 
   return {
     getEntries: () => entries.filter((e) => e.source.trim()),
