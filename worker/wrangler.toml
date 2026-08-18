@@ -46,8 +46,11 @@ simple = { limit = 40, period = 10 }
 # database_id 不写入本文件明文：先执行一次
 #   npx wrangler d1 create nmt-relay
 # 把返回的 id 存进 GitHub Secrets 的 D1_DATABASE_ID，deploy-worker.yml 部署时用 sed 注入替换
-# 下方占位符，本文件在仓库里始终保持占位符原样。表结构由 migrations/ 目录管理，deploy-worker.yml
-# 在每次部署时执行 `wrangler d1 migrations apply --remote`，业务代码热路径不再包含任何 DDL。
+# 下方占位符，本文件在仓库里始终保持占位符原样。表结构由 migrations/ 目录下的 SQL 文件定义，但
+# 应用迁移是一次性本地操作，不进 CI：建库后在本机执行一次
+#   npx wrangler login && npx wrangler d1 migrations apply nmt-relay --remote
+# 用你个人的交互式登录而非长期 token，GitHub Actions 侧不持有、也不需要任何 D1 编辑权限——
+# 这是极低频操作，不值得为它在 CI 常驻一个能写 D1 的高权限凭证。业务代码热路径不含任何 DDL。
 [[d1_databases]]
 binding = "DB"
 database_name = "nmt-relay"
