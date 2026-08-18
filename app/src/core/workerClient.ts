@@ -4,7 +4,6 @@ import { computeProbeBitmap } from "./envProbe";
 const PENDING_SUCCESS_KEY = "nmt_pending_success";
 const STANDBY_TTL_MS = 60_000;
 const ACTIVE_TTL_MS = 20_000;
-const BATCH_JOIN_SEPARATOR = "\u0000";
 
 export interface Stats {
   total: number;
@@ -183,25 +182,23 @@ async function attemptTranslate(text: string, source: string, target: string): P
   return { translatedHtml: payload.translatedHtml, maxChars: payload.maxChars || active.maxChars, detectedLang: payload.detectedLang ?? null };
 }
 
-async function attemptTranslateBatch(htmls: string[], source: string, target: string): Promise<{ results: (string | null)[]; maxChars: number }> {
+async function attemptTranslateJob(job: TranslateJobPayload): Promise<TranslateJobResponse> {
   const active = await ensureSession();
   session = null;
   const probeBitmap = computeProbeBitmap();
-  const answer = await computeAnswer(active.challengeKey, active.nonce, htmls.join(BATCH_JOIN_SEPARATOR), probeBitmap);
+  const answer = await computeAnswer(active.challengeKey, active.nonce, job.content, probeBitmap);
   const pending = readPendingSuccess();
-  const payload = await request("/translate-batch", {
+  const payload = await request("/translate-job", {
     token: active.token,
     answer,
     probeBitmap,
-    batches: htmls,
-    source,
-    target,
+    ...job,
     ...(pending ? { pendingSuccess: pending } : {}),
     ...(clearance ? { clearance } : {}),
   });
   if (pending) clearPendingSuccess();
   adoptSession(payload, ACTIVE_TTL_MS);
-  return { results: payload.results, maxChars: payload.maxChars || active.maxChars };
+  return payload as TranslateJobResponse;
 }
 
 const RATE_LIMIT_BASE_BACKOFF_MS = 5_000;
@@ -254,8 +251,28 @@ export function postTranslateHtml(text: string, source: string, target: string):
   return withRetry(() => attemptTranslate(text, source, target));
 }
 
-export function postTranslateBatch(htmls: string[], source: string, target: string): Promise<(string | null)[]> {
-  return withRetry(() => attemptTranslateBatch(htmls, source, target)).then((r) => r.results);
+export interface TranslateJobPayload {
+  content: string;
+  glossary: Record<string, string>;
+  source: string;
+  target: string;
+  stripSdhEnabled?: boolean;
+  sceneChangeSeconds?: number;
+}
+
+export interface TranslateJobResponse {
+  success: boolean;
+  resolved_source_lang: string;
+  sdh_removed: { dropped: number; stripped: number };
+  cues: { id: number; start: string; end: string; text: string; translation: string | null }[];
+  approx_splits: { unit_id: number; cues: number[]; method: string }[];
+  missing_count: number;
+  missing_cues: number[];
+  maxChars: number;
+}
+
+export function postTranslateJob(job: TranslateJobPayload): Promise<TranslateJobResponse> {
+  return withRetry(() => attemptTranslateJob(job));
 }
 
 const DETECT_SAMPLE_TARGET = "en";

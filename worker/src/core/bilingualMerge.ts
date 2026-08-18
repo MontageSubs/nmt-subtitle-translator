@@ -1,7 +1,7 @@
-import { Cue, Unit, Span, BilingualCue, MergeResult, OutputMode } from "./types";
+import { Cue, Unit, Span, BilingualCue } from "./types";
 import { isChineseTarget, languageProfile } from "./languageProfiles";
 import { getSyncCutter, registerGlossaryTerm, SyncCutter } from "./segmenter";
-import { uiLog } from "./uiLog";
+import { coreLog } from "./log";
 
 const ELLIPSIS_PATTERN = /\.{2,}|…+/g;
 const DASH_ARTIFACT_PATTERN = /—+|-{2,}/g;
@@ -30,7 +30,7 @@ const MARKER_PATTERN = /\u27e6c(\d+)\u27e7/g;
 const RESIDUAL_MARKER_PATTERN = /\s*\u27e6[^\u27e6\u27e7]*\u27e7\s*/g;
 
 function log(message: string) {
-  uiLog(`[merge] ${message}`);
+  coreLog("merge", message);
 }
 
 function usesLatinPunctuation(sourceLang: string | undefined | null): boolean {
@@ -553,25 +553,15 @@ async function buildBilingualCues(
   return { cues: results, approxSplits };
 }
 
-function formatSrtTime(value: string): string {
-  return value.replace(".", ",");
-}
-
-function renderSrt(cues: BilingualCue[], mode: OutputMode): string {
-  const blocks: string[] = [];
-  cues.forEach((cue, i) => {
-    const translation = cue.translation || "";
-    const lines = mode === "bilingual"
-      ? (translation ? [translation, cue.text] : [cue.text])
-      : [translation || cue.text];
-    blocks.push(`${i + 1}\n${formatSrtTime(cue.start)} --> ${formatSrtTime(cue.end)}\n${lines.join("\n")}`);
-  });
-  return blocks.join("\n\n") + "\n";
+export interface MergeResult {
+  cues: BilingualCue[];
+  approx_splits: ApproxSplit[];
+  missing_count: number;
+  missing_cues: number[];
 }
 
 export async function merge(
-  cues: Cue[], units: Unit[], translations: Record<string, string>,
-  sourceLang: string, targetLang: string, outputMode: OutputMode
+  cues: Cue[], units: Unit[], translations: Record<string, string>, sourceLang: string, targetLang: string
 ): Promise<MergeResult> {
   const cutFn = isChineseTarget(targetLang) ? await getSyncCutter() : null;
   const { cues: mergedCues, approxSplits } = await buildBilingualCues(cues, units, translations, targetLang, sourceLang, cutFn);
@@ -584,11 +574,5 @@ export async function merge(
   }
   for (const cid of missingCues) log(`missing translation: cue ${cid} / srt #${positionOfCue.get(cid)}`);
 
-  return {
-    srt: renderSrt(mergedCues, isChineseTarget(targetLang) ? outputMode : "monolingual"),
-    cues: mergedCues,
-    approx_splits: approxSplits,
-    missing_count: missingCues.length,
-    missing_cues: missingCues,
-  };
+  return { cues: mergedCues, approx_splits: approxSplits, missing_count: missingCues.length, missing_cues: missingCues };
 }

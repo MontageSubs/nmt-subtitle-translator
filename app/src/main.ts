@@ -1,11 +1,9 @@
 import "./style.css";
-import { extract, DEFAULT_SCENE_CHANGE_SECONDS, previewChapterCount, parseSrt } from "./core/srtExtract";
-import { translateUnits } from "./core/translateClient";
-import { merge } from "./core/bilingualMerge";
+import { DEFAULT_SCENE_CHANGE_SECONDS, previewChapterCount, parseSrtPreview } from "./core/srtPreview";
+import { renderSrt } from "./core/srtRender";
 import { SOURCE_LANGUAGES, TARGET_LANGUAGES, AUTO_DETECT_CODE, defaultOutputMode, languageProfile } from "./core/languageProfiles";
-import { OutputMode } from "./core/types";
-import { handshake, bufferSuccess, detectLanguage } from "./core/workerClient";
-import { setUiLogSink, uiLog } from "./core/uiLog";
+import { Cue, OutputMode } from "./core/types";
+import { handshake, bufferSuccess, detectLanguage, postTranslateJob, TranslateJobResponse } from "./core/workerClient";
 import { loadBundledDictionary, entriesToGlossary, DictionaryEntry } from "./core/dictionary";
 import { mountGlossaryEditor } from "./components/glossaryEditor";
 import { openPreviewModal, PreviewCard } from "./components/previewModal";
@@ -24,8 +22,9 @@ const app = document.getElementById("app")!;
 interface AppState {
   srtFile: File | null;
   srtContent: string;
-  lastCues: ReturnType<typeof extract>["cues"];
-  lastMergeResult: Awaited<ReturnType<typeof merge>> | null;
+  lastCues: Cue[];
+  lastJobResult: TranslateJobResponse | null;
+  lastRenderMode: OutputMode;
   sourceLang: string;
   targetLang: string;
   outputMode: OutputMode;
@@ -39,7 +38,8 @@ const state: AppState = {
   srtFile: null,
   srtContent: "",
   lastCues: [],
-  lastMergeResult: null,
+  lastJobResult: null,
+  lastRenderMode: "monolingual",
   sourceLang: AUTO_DETECT_CODE,
   targetLang: "zh",
   outputMode: "monolingual",
@@ -255,7 +255,6 @@ function wireApp() {
     logEl.textContent += `${message}\n`;
     logEl.scrollTop = logEl.scrollHeight;
   }
-  setUiLogSink(appendLog);
 
   async function handleFile(file: File) {
     state.srtFile = file;
@@ -265,7 +264,7 @@ function wireApp() {
     optionsStep.hidden = false;
     startStep.hidden = false;
 
-    const { cues } = parseSrt(state.srtContent, false, false, false);
+    const cues = parseSrtPreview(state.srtContent);
     state.lastCues = cues;
     updateScenePreview();
 
@@ -311,7 +310,8 @@ function wireApp() {
     progressCard.hidden = false;
     resultCard.hidden = true;
     logEl.textContent = "";
-    progressBar.value = 0;
+    progressBar.removeAttribute("value");
+    progressCount.textContent = "";
 
     try {
       const sourceLang = sourceSelect.value === AUTO_DETECT_CODE ? "en" : sourceSelect.value;
@@ -320,42 +320,31 @@ function wireApp() {
       const sceneChangeSeconds = state.sceneSeconds;
       const stripSdhEnabled = sdhToggle.checked;
 
-      progressLabel.textContent = t("progress.parsing");
+      progressLabel.textContent = t("progress.translating");
       state.glossaryEntries = glossaryHandle.getEntries() as DictionaryEntry[];
       const glossary = entriesToGlossary(state.glossaryEntries);
 
-      const extracted = extract(state.srtContent, glossary, { sourceLang, stripSdhEnabled, sceneChangeSeconds });
-      if (!extracted.success) throw new Error(t("error.parseFailed"));
-      uiLog(t("log.extractSummary", { cues: extracted.cues.length, units: extracted.units.length, chapters: extracted.chapters.length }));
+      const job = await postTranslateJob({ content: state.srtContent, glossary, source: sourceLang, target: targetLang, stripSdhEnabled, sceneChangeSeconds });
+      if (!job.success) throw new Error(t("error.parseFailed"));
+      state.lastJobResult = job;
+      state.lastRenderMode = outputMode;
 
-      progressLabel.textContent = t("progress.translating");
-      const { translations, skipped } = await translateUnits(
-        extracted.units, extracted.chapters, extracted.cues, sourceLang, targetLang,
-        {
-          onProgress: (event) => {
-            const percent = event.total ? Math.round((event.completed / event.total) * 100) : 0;
-            progressBar.value = percent;
-            progressCount.textContent = t("progress.batches", { completed: event.completed, total: event.total });
-          },
-        }
-      );
-
+      progressBar.value = 100;
       progressLabel.textContent = t("progress.merging");
-      const result = await merge(extracted.cues, extracted.units, translations, sourceLang, targetLang, outputMode);
-      state.lastMergeResult = result;
+      const srt = renderSrt(job.cues, outputMode);
 
-      const blob = new Blob([result.srt], { type: "text/plain;charset=utf-8" });
+      const blob = new Blob([srt], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       downloadLink.href = url;
       downloadLink.download = state.srtFile.name.replace(/\.srt$/i, `.${targetLang}.srt`);
 
       resultSummary.textContent = t("result.summary", {
-        cues: extracted.cues.length, missing: result.missing_count, splits: result.approx_splits.length, skipped: skipped.length,
+        cues: job.cues.length, missing: job.missing_count, splits: job.approx_splits.length, skipped: job.missing_cues.length,
       });
       resultCard.hidden = false;
       progressLabel.textContent = t("progress.done");
 
-      const completionRatio = extracted.cues.length ? (extracted.cues.length - result.missing_count) / extracted.cues.length : 0;
+      const completionRatio = job.cues.length ? (job.cues.length - job.missing_count) / job.cues.length : 0;
       if (completionRatio >= SUCCESS_COMPLETION_THRESHOLD) {
         downloadLink.addEventListener("click", () => bufferSuccess(), { once: true });
       }
@@ -368,11 +357,11 @@ function wireApp() {
   });
 
   previewButton.addEventListener("click", () => {
-    if (!state.lastMergeResult) return;
-    const cards: PreviewCard[] = state.lastMergeResult.cues.map((c) => ({
+    if (!state.lastJobResult) return;
+    const cards: PreviewCard[] = state.lastJobResult.cues.map((c) => ({
       id: c.id, start: c.start, end: c.end, source: c.text, target: c.translation || t("preview.missing"),
     }));
-    openPreviewModal(state.lastMergeResult.srt, cards);
+    openPreviewModal(renderSrt(state.lastJobResult.cues, state.lastRenderMode), cards);
   });
 }
 

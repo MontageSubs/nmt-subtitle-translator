@@ -1,4 +1,4 @@
-import { Env, ACTIVE_TTL_MS, BATCH_CHARS_TOLERANCE, maxBatchChars, maxBatchesPerRequest, remainingBudgetMs } from "../env";
+import { Env, ACTIVE_TTL_MS, BATCH_CHARS_TOLERANCE, maxBatchChars } from "../env";
 import { issueSession, verifyToken } from "../token";
 import { computeAnswer, deriveChallengeKey } from "../challenge";
 import { probeBitmapValid } from "../envProbe";
@@ -10,24 +10,31 @@ import { hashIp, clientIp } from "../identity";
 import { json, parseBody, logGate, reportError } from "../response";
 import { gateForRequest, consumeBurst, escalateOnBurstTrip, consumeRateLimit } from "../gate";
 import { reportPending } from "../stats";
-import { fanOutTranslations } from "../upstream";
+import { runTranslateJob } from "../core/pipeline";
+import { Glossary } from "../core/srtExtract";
 
-const BATCH_JOIN_SEPARATOR = "\u0000";
-
-interface TranslateBatchRequestBody {
+interface TranslateJobRequestBody {
   token?: string;
   answer?: number;
-  batches?: string[];
+  content?: string;
+  glossary?: Glossary;
   source?: string;
   target?: string;
+  stripSdhEnabled?: boolean;
+  sceneChangeSeconds?: number;
   pendingSuccess?: number;
   clearance?: string;
   probeBitmap?: number;
 }
 
-export async function handleTranslateBatch(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
+function isValidGlossary(value: unknown): value is Glossary {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+    && Object.entries(value as Record<string, unknown>).every(([k, v]) => typeof k === "string" && typeof v === "string");
+}
+
+export async function handleTranslateJob(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
   const startedAt = Date.now();
-  const body = await parseBody<TranslateBatchRequestBody>(request);
+  const body = await parseBody<TranslateJobRequestBody>(request);
   if (!body) return json({ error: "malformed JSON" }, 400, origin, env);
 
   const ipHash = await hashIp(env, clientIp(request));
@@ -35,7 +42,7 @@ export async function handleTranslateBatch(request: Request, env: Env, ctx: Exec
 
   if (!(await consumeBurst(env, ipHash))) {
     escalateOnBurstTrip(ctx, env, ipHash, now);
-    logGate("burst_detected", ipHash, { path: "/translate-batch" });
+    logGate("burst_detected", ipHash, { path: "/translate-job" });
     return json({ error: "rate_limited", trigger_turnstile: true }, 429, origin, env);
   }
 
@@ -57,20 +64,20 @@ export async function handleTranslateBatch(request: Request, env: Env, ctx: Exec
     return json({ error: "token already used" }, 401, origin, env);
   }
 
-  const { batches, source, target } = body;
-  const cap = maxBatchesPerRequest(env);
-  if (!Array.isArray(batches) || !batches.length || batches.length > cap || !source || !target || batches.some((b) => typeof b !== "string")) {
-    return json({ error: "invalid translate-batch request" }, 400, origin, env);
+  const { content, source, target, stripSdhEnabled, sceneChangeSeconds } = body;
+  const glossary = isValidGlossary(body.glossary) ? body.glossary : {};
+  if (!content || !source || !target) {
+    return json({ error: "invalid translate-job request" }, 400, origin, env);
   }
 
   const limit = maxBatchChars(env);
-  if (batches.some((b) => b.length > limit * BATCH_CHARS_TOLERANCE)) {
+  if (content.length > limit * BATCH_CHARS_TOLERANCE) {
     return json({ error: "payload exceeds maxChars", maxChars: limit }, 413, origin, env);
   }
 
   const probeBitmap = Number(body.probeBitmap);
   const keyBytes = await deriveChallengeKey(matchedSecret, payload.nonce);
-  const expected = await computeAnswer(keyBytes, payload.nonce, batches.join(BATCH_JOIN_SEPARATOR), probeBitmap);
+  const expected = await computeAnswer(keyBytes, payload.nonce, content, probeBitmap);
   if (expected !== body.answer) {
     logGate("challenge_mismatch", ipHash);
     return json({ error: "challenge mismatch" }, 403, origin, env);
@@ -91,9 +98,8 @@ export async function handleTranslateBatch(request: Request, env: Env, ctx: Exec
     }
   }
 
-  const totalChars = batches.reduce((sum, b) => sum + b.length, 0);
   try {
-    const success = await consumeRateLimit(env, ipHash, totalChars, gate.degraded, cleared);
+    const success = await consumeRateLimit(env, ipHash, content.length, gate.degraded, cleared);
     if (!success) {
       logGate("rate_limited", ipHash, { cleared });
       return json({ error: "rate_limited", trigger_turnstile: !cleared }, 429, origin, env);
@@ -102,9 +108,15 @@ export async function handleTranslateBatch(request: Request, env: Env, ctx: Exec
     reportError("rate limiter unavailable, failing open", e);
   }
 
-  const results = await fanOutTranslations(env, batches, source, target, remainingBudgetMs(startedAt));
+  let job: Awaited<ReturnType<typeof runTranslateJob>>;
+  try {
+    job = await runTranslateJob(env, { content, glossary, source, target }, limit, startedAt);
+  } catch (e) {
+    reportError("translate job failed", e);
+    return json({ error: "translate job failed" }, 502, origin, env);
+  }
 
   reportPending(ctx, env, body.pendingSuccess);
   const { token, challengeKey, nonce } = await issueSession(ring, ACTIVE_TTL_MS);
-  return json({ results, token, challengeKey, nonce, maxChars: limit }, 200, origin, env);
+  return json({ ...job, token, challengeKey, nonce, maxChars: limit }, 200, origin, env);
 }

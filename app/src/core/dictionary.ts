@@ -1,9 +1,22 @@
-import { Glossary, splitNamePair } from "./srtExtract";
+import { Glossary } from "./types";
 
 export interface DictionaryEntry {
   source: string;
   target: string;
 }
+
+const NAME_SEPARATOR_PATTERN = /[·・]/;
+
+function splitNamePair(original: string, translated: string): [string, string][] {
+  const origTokens = original.split(/\s+/).filter(Boolean);
+  const transTokens = translated.split(NAME_SEPARATOR_PATTERN).filter(Boolean);
+  const pairs: [string, string][] = [[original, translated]];
+  if (origTokens.length >= 2 && origTokens.length === transTokens.length) {
+    pairs.push([origTokens[0], transTokens[0]]);
+  }
+  return pairs;
+}
+
 
 const BUNDLED_DICTIONARIES = import.meta.glob("../dictionaries/*.json", { eager: false }) as Record<string, () => Promise<{ default: DictionaryEntry[] }>>;
 
