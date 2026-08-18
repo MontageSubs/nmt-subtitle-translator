@@ -115,6 +115,9 @@ select:focus, input:focus, textarea:focus { outline: 2px solid var(--accent); ou
 }
 
 .dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   border: 1.5px dashed var(--line);
   border-radius: var(--radius);
   padding: 28px 16px;
