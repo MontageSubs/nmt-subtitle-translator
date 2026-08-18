@@ -141,25 +141,28 @@ function loadTurnstileScript(): Promise<void> {
 async function resolveTurnstile(): Promise<void> {
   if (!TURNSTILE_SITE_KEY) throw new WorkerRequestError("触发限流，但未配置 Turnstile site key", false);
   await loadTurnstileScript();
-  const container = document.getElementById("turnstile-container");
-  if (!container) throw new WorkerRequestError("触发限流，但页面缺少 #turnstile-container", false);
+  const backdrop = document.getElementById("captcha-backdrop");
+  const widget = document.getElementById("captcha-widget");
+  if (!backdrop || !widget) throw new WorkerRequestError("触发限流，但页面缺少验证码弹层容器", false);
 
-  container.hidden = false;
-  container.innerHTML = "";
-  const turnstileToken = await new Promise<string>((resolve, reject) => {
-    window.turnstile!.render(container, {
-      sitekey: TURNSTILE_SITE_KEY,
-      callback: (token: string) => resolve(token),
-      "error-callback": () => reject(new Error("turnstile challenge failed")),
+  backdrop.hidden = false;
+  widget.innerHTML = "";
+  try {
+    const turnstileToken = await new Promise<string>((resolve, reject) => {
+      window.turnstile!.render(widget, {
+        sitekey: TURNSTILE_SITE_KEY,
+        callback: (token: string) => resolve(token),
+        "error-callback": () => reject(new Error("turnstile challenge failed")),
+      });
     });
-  });
-  container.hidden = true;
-
-  const payload = await request("/turnstile", { turnstileToken });
-  clearance = payload.clearance;
+    const payload = await request("/turnstile", { turnstileToken });
+    clearance = payload.clearance;
+  } finally {
+    backdrop.hidden = true;
+  }
 }
 
-async function attemptTranslate(text: string, source: string, target: string): Promise<{ translatedHtml: string; maxChars: number }> {
+async function attemptTranslate(text: string, source: string, target: string): Promise<{ translatedHtml: string; maxChars: number; detectedLang: string | null }> {
   const active = await ensureSession();
   session = null;
   const probeBitmap = computeProbeBitmap();
@@ -177,7 +180,7 @@ async function attemptTranslate(text: string, source: string, target: string): P
   });
   if (pending) clearPendingSuccess();
   adoptSession(payload, ACTIVE_TTL_MS);
-  return { translatedHtml: payload.translatedHtml, maxChars: payload.maxChars || active.maxChars };
+  return { translatedHtml: payload.translatedHtml, maxChars: payload.maxChars || active.maxChars, detectedLang: payload.detectedLang ?? null };
 }
 
 async function attemptTranslateBatch(htmls: string[], source: string, target: string): Promise<{ results: (string | null)[]; maxChars: number }> {
@@ -253,4 +256,23 @@ export function postTranslateHtml(text: string, source: string, target: string):
 
 export function postTranslateBatch(htmls: string[], source: string, target: string): Promise<(string | null)[]> {
   return withRetry(() => attemptTranslateBatch(htmls, source, target)).then((r) => r.results);
+}
+
+const DETECT_SAMPLE_TARGET = "en";
+const DETECT_SAMPLE_MAX_CHARS = 600;
+
+/**
+ * 借助 translateHtml 端点自带的 source="auto" 探测能力识别字幕语言：
+ * 未经实测确认上游响应是否稳定携带检测结果——如果始终拿到 null，说明这条路径在生产环境不可用，
+ * 需要改回纯手动选择语言，而不是假装探测成功。
+ */
+export async function detectLanguage(sampleText: string): Promise<string | null> {
+  if (!sampleText.trim()) return null;
+  const sample = sampleText.slice(0, DETECT_SAMPLE_MAX_CHARS);
+  try {
+    const { detectedLang } = await withRetry(() => attemptTranslate(sample, "auto", DETECT_SAMPLE_TARGET));
+    return detectedLang;
+  } catch {
+    return null;
+  }
 }

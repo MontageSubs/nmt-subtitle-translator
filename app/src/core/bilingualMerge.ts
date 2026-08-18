@@ -1,5 +1,5 @@
 import { Cue, Unit, Span, BilingualCue, MergeResult, OutputMode } from "./types";
-import { isChineseTarget } from "./languageProfiles";
+import { isChineseTarget, languageProfile } from "./languageProfiles";
 import { getSyncCutter, registerGlossaryTerm, SyncCutter } from "./segmenter";
 import { uiLog } from "./uiLog";
 
@@ -33,17 +33,13 @@ function log(message: string) {
   uiLog(`[merge] ${message}`);
 }
 
-const LATIN_PUNCT_SOURCE_LANGS = new Set([
-  "en", "es", "fr", "de", "it", "pt", "nl", "sv", "da", "no", "fi",
-  "pl", "cs", "hu", "ro", "tr", "id", "vi", "ms", "tl", "ca", "eu", "gl",
-]);
-
 function usesLatinPunctuation(sourceLang: string | undefined | null): boolean {
-  return LATIN_PUNCT_SOURCE_LANGS.has((sourceLang || "").split("-")[0].toLowerCase());
+  return languageProfile(sourceLang).usesLatinPunctuation;
 }
 
 function punctuationAnchorsEnabled(sourceLang: string | undefined | null, targetLang: string | undefined | null): boolean {
-  return isChineseTarget(targetLang) && usesLatinPunctuation(sourceLang);
+  if (!usesLatinPunctuation(sourceLang)) return false;
+  return isChineseTarget(targetLang) || usesLatinPunctuation(targetLang);
 }
 
 function collectGlossaryTerms(units: Unit[]): Set<string> {
@@ -119,7 +115,7 @@ function spaceAfterEllipsis(matched: string, offset: number, full: string): stri
 function normalizeTranslation(text: string, targetLang: string): string {
   text = text.replace(DASH_ARTIFACT_PATTERN, "...");
   text = text.replace(ELLIPSIS_PATTERN, spaceAfterEllipsis);
-  if (isChineseTarget(targetLang)) {
+  if (languageProfile(targetLang).stripsCjkTerminalPunctuation) {
     text = text.replace(CJK_TERMINATOR_PATTERN, stripTerminator);
     text = text.replace(HALFWIDTH_COMMA_PATTERN, stripTerminator);
   }
@@ -590,6 +586,7 @@ export async function merge(
 
   return {
     srt: renderSrt(mergedCues, isChineseTarget(targetLang) ? outputMode : "monolingual"),
+    cues: mergedCues,
     approx_splits: approxSplits,
     missing_count: missingCues.length,
     missing_cues: missingCues,

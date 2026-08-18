@@ -1,5 +1,6 @@
 import { Unit, Chapter, Cue, ProgressEvent } from "./types";
 import { postTranslateHtml, postTranslateBatch, getMaxChars, WorkerRequestError } from "./workerClient";
+import { languageProfile } from "./languageProfiles";
 import { uiLog } from "./uiLog";
 
 const GROUP_MARKER_PATTERN = /\u27e6g([^\u27e6\u27e7]+)\u27e7/g;
@@ -14,7 +15,16 @@ const CONTENT_CHAR_PATTERN = /[\p{L}\p{N}_]/u;
 
 const EMBED_RATIO_THRESHOLD = 0.3;
 const TERM_PLACEHOLDER_TEMPLATE = (idx: number) => `\u27e6T${String(idx).padStart(2, "0")}\u27e7`;
-const VARIANT_PRIORITY = ["embedded", "placeholder", "plain"] as const;
+const VARIANT_PRIORITY = ["bracketed", "embedded", "placeholder", "plain"] as const;
+
+// 拉丁语系目标语言下，术语表的目标译词有时与源文拼写恰好雷同/相近，直接嵌入原文（embedded 变体）
+// 可能被 Google 误判为拼写错误而"纠正"掉。这里改为把原词原样括起来发送，回收时校验括号数量是否
+// 与发送前一致——一致则说明位置未被打乱，安全地替换成术语表译词；数量对不上则放弃，交给同批并发
+// 请求的 placeholder 变体兜底。方括号选用生僻的 QUILL 变体，正常字幕文本内容不会自然出现。
+const BRACKET_OPEN = "\u2045";
+const BRACKET_CLOSE = "\u2046";
+const BRACKETED_TERM_PATTERN = /\u2045([^\u2045\u2046]*)\u2046/g;
+const STYLE_TAG_PATTERN = /<\/?(i|b|u)>/gi;
 
 const BATCH_PACK_RATIO = 0.9;
 const INDEX_DIGITS_ESTIMATE = 4;
@@ -301,6 +311,12 @@ interface TermMatch {
   target: string;
 }
 
+interface VariantPayload {
+  sourceText: string;
+  mapping: Record<string, string>;
+  bracketOrder?: string[];
+}
+
 function applyTermMatches(text: string, termMatches: TermMatch[], variant: "embedded" | "placeholder"): [string, Record<string, string>] {
   const pieces: string[] = [];
   const mapping: Record<string, string> = {};
@@ -320,24 +336,70 @@ function applyTermMatches(text: string, termMatches: TermMatch[], variant: "embe
   return [pieces.join(""), mapping];
 }
 
-function buildVariants(unit: Unit): Record<string, [string, Record<string, string>]> {
+function applyTermMatchesBracketed(text: string, termMatches: TermMatch[]): [string, string[]] {
+  const pieces: string[] = [];
+  const order: string[] = [];
+  let cursor = 0;
+  termMatches.forEach((match) => {
+    pieces.push(text.slice(cursor, match.start), BRACKET_OPEN, match.source, BRACKET_CLOSE);
+    order.push(match.target);
+    cursor = match.end;
+  });
+  pieces.push(text.slice(cursor));
+  return [pieces.join(""), order];
+}
+
+function resolveBracketed(result: string, order: string[]): string | null {
+  const matches = [...result.matchAll(BRACKETED_TERM_PATTERN)];
+  if (matches.length !== order.length) return null;
+  let cursor = 0;
+  const pieces: string[] = [];
+  matches.forEach((m, idx) => {
+    pieces.push(result.slice(cursor, m.index), order[idx]);
+    cursor = m.index! + m[0].length;
+  });
+  pieces.push(result.slice(cursor));
+  return pieces.join("");
+}
+
+function styleTagsIntact(sourceText: string, translatedText: string): boolean {
+  if (!STYLE_TAG_PATTERN.test(sourceText)) return true;
+  const openCount = (translatedText.match(/<(i|b|u)>/gi) || []).length;
+  const closeCount = (translatedText.match(/<\/(i|b|u)>/gi) || []).length;
+  return openCount > 0 && openCount === closeCount;
+}
+
+function stripStyleTags(text: string): string {
+  return text.replace(STYLE_TAG_PATTERN, "");
+}
+
+function buildVariants(unit: Unit, targetLang: string): Record<string, VariantPayload> {
   const { text, term_matches: matches = [], embed_ratio: ratio = 0 } = unit;
-  if (!matches.length) return { plain: [text, {}] };
-  if (ratio > EMBED_RATIO_THRESHOLD) return { placeholder: applyTermMatches(text, matches, "placeholder") };
+  if (!matches.length) return { plain: { sourceText: text, mapping: {} } };
+  const [placeholderText, placeholderMapping] = applyTermMatches(text, matches, "placeholder");
+  if (ratio > EMBED_RATIO_THRESHOLD) return { placeholder: { sourceText: placeholderText, mapping: placeholderMapping } };
+  if (languageProfile(targetLang).usesLatinPunctuation) {
+    const [bracketedText, order] = applyTermMatchesBracketed(text, matches);
+    return {
+      bracketed: { sourceText: bracketedText, mapping: {}, bracketOrder: order },
+      placeholder: { sourceText: placeholderText, mapping: placeholderMapping },
+    };
+  }
+  const [embeddedText, embeddedMapping] = applyTermMatches(text, matches, "embedded");
   return {
-    embedded: applyTermMatches(text, matches, "embedded"),
-    placeholder: applyTermMatches(text, matches, "placeholder"),
+    embedded: { sourceText: embeddedText, mapping: embeddedMapping },
+    placeholder: { sourceText: placeholderText, mapping: placeholderMapping },
   };
 }
 
-function flattenUnits(units: Unit[], chapterOfUnit: Map<number, number>) {
+function flattenUnits(units: Unit[], chapterOfUnit: Map<number, number>, targetLang: string) {
   const items: Item[] = [];
   const chapterItems = new Map<number | undefined, string[]>();
   for (const unit of units) {
     const chapterId = chapterOfUnit.get(unit.id);
-    for (const [variant, [text]] of Object.entries(buildVariants(unit))) {
+    for (const [variant, payload] of Object.entries(buildVariants(unit, targetLang))) {
       const itemId = `${unit.id}:${variant}`;
-      items.push({ id: itemId, text });
+      items.push({ id: itemId, text: payload.sourceText });
       if (!chapterItems.has(chapterId)) chapterItems.set(chapterId, []);
       chapterItems.get(chapterId)!.push(itemId);
     }
@@ -352,14 +414,28 @@ function restorePlaceholders(text: string, mapping: Record<string, string>): str
 }
 
 function resolveTranslation(unit: Unit, translations: Map<string, string>, sourceLang: string, targetLang: string): [string | null, string | null, Record<string, string> | null] {
-  const variants = buildVariants(unit);
+  const variants = buildVariants(unit, targetLang);
   for (const variant of VARIANT_PRIORITY) {
-    if (!(variant in variants)) continue;
-    const [sourceText, mapping] = variants[variant];
+    const payload = variants[variant];
+    if (!payload) continue;
     const result = translations.get(`${unit.id}:${variant}`);
     if (result === undefined) continue;
-    if (variant === "embedded" && "placeholder" in variants && isUntranslated(result, sourceLang, targetLang)) continue;
-    return [restorePlaceholders(result, mapping), sourceText, mapping];
+
+    let resolved: string | null;
+    if (variant === "bracketed") {
+      resolved = payload.bracketOrder ? resolveBracketed(result, payload.bracketOrder) : null;
+      if (resolved === null) continue;
+    } else if (variant === "embedded" && "placeholder" in variants && isUntranslated(result, sourceLang, targetLang)) {
+      continue;
+    } else {
+      resolved = restorePlaceholders(result, payload.mapping);
+    }
+
+    if (!styleTagsIntact(unit.text, resolved)) {
+      log(`unit ${unit.id}: inline style tags lost or unbalanced after translation, stripping to avoid broken markup`);
+      resolved = stripStyleTags(resolved);
+    }
+    return [resolved, payload.sourceText, payload.mapping];
   }
   return [null, null, null];
 }
@@ -532,7 +608,7 @@ export async function translateUnits(
   const chapterOfUnit = new Map<number, number>();
   for (const chapter of chapters) for (const uid of chapter.unit_ids) chapterOfUnit.set(uid, chapter.id);
 
-  const { items, chapterGroups } = flattenUnits(pending, chapterOfUnit);
+  const { items, chapterGroups } = flattenUnits(pending, chapterOfUnit, targetLang);
   const { translations: translationsRaw } = items.length
     ? await translate(items, chapterGroups, sourceLang, targetLang, maxChars, options.onProgress)
     : { translations: new Map<string, string>() };

@@ -5,7 +5,20 @@ const UPSTREAM_ENDPOINT = "https://translate-pa.googleapis.com/v1/translateHtml"
 const FALLBACK_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const BATCH_FANOUT_CONCURRENCY = 6;
 
-export async function fetchUpstreamTranslation(env: Env, text: string, source: string, target: string, signal?: AbortSignal): Promise<string> {
+export interface UpstreamTranslation {
+  translatedHtml: string;
+  detectedLang: string | null;
+}
+
+const LANG_CODE_PATTERN = /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/;
+
+function extractDetectedLang(payload: unknown): string | null {
+  const candidates = [(payload as any)?.[0]?.[1], (payload as any)?.[1]];
+  for (const c of candidates) if (typeof c === "string" && LANG_CODE_PATTERN.test(c)) return c;
+  return null;
+}
+
+export async function fetchUpstreamTranslation(env: Env, text: string, source: string, target: string, signal?: AbortSignal): Promise<UpstreamTranslation> {
   const headers = new Headers({ "Content-Type": "application/json+protobuf", "User-Agent": FALLBACK_USER_AGENT });
   const upstreamUrl = new URL(UPSTREAM_ENDPOINT);
   if (env.GOOGLE_TRANSLATE_API_KEY) {
@@ -19,7 +32,7 @@ export async function fetchUpstreamTranslation(env: Env, text: string, source: s
   const payload = (await response.json().catch(() => null)) as unknown;
   const translatedHtml = Array.isArray(payload) ? (payload as any)?.[0]?.[0] : undefined;
   if (typeof translatedHtml !== "string") throw new Error("unexpected upstream response shape");
-  return translatedHtml;
+  return { translatedHtml, detectedLang: source === "auto" ? extractDetectedLang(payload) : null };
 }
 
 export async function fanOutTranslations(env: Env, texts: string[], source: string, target: string, budgetMs: number): Promise<(string | null)[]> {
@@ -31,7 +44,7 @@ export async function fanOutTranslations(env: Env, texts: string[], source: stri
     while (cursor < texts.length) {
       const i = cursor++;
       try {
-        results[i] = await fetchUpstreamTranslation(env, texts[i], source, target, controller.signal);
+        results[i] = (await fetchUpstreamTranslation(env, texts[i], source, target, controller.signal)).translatedHtml;
       } catch (e) {
         reportError(`upstream batch ${i} failed`, e);
       }

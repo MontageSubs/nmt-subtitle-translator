@@ -62,6 +62,7 @@ export interface BilingualCue extends Cue {
 
 export interface MergeResult {
   srt: string;
+  cues: BilingualCue[];
   approx_splits: { unit_id: number; cues: number[]; method: string }[];
   missing_count: number;
   missing_cues: number[];

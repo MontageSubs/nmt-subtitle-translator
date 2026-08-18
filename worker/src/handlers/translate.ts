@@ -94,9 +94,9 @@ export async function handleTranslate(request: Request, env: Env, ctx: Execution
     reportError("rate limiter unavailable, failing open", e);
   }
 
-  let translatedHtml: string;
+  let upstream: { translatedHtml: string; detectedLang: string | null };
   try {
-    translatedHtml = await fetchUpstreamTranslation(env, text, source, target, AbortSignal.timeout(remainingBudgetMs(startedAt)));
+    upstream = await fetchUpstreamTranslation(env, text, source, target, AbortSignal.timeout(remainingBudgetMs(startedAt)));
   } catch (e) {
     reportError("upstream translate failed", e);
     return json({ error: "upstream translate failed" }, 502, origin, env);
@@ -104,5 +104,5 @@ export async function handleTranslate(request: Request, env: Env, ctx: Execution
 
   reportPending(ctx, env, body.pendingSuccess);
   const { token, challengeKey, nonce } = await issueSession(ring, ACTIVE_TTL_MS);
-  return json({ translatedHtml, token, challengeKey, nonce, maxChars: limit }, 200, origin, env);
+  return json({ translatedHtml: upstream.translatedHtml, detectedLang: upstream.detectedLang, token, challengeKey, nonce, maxChars: limit }, 200, origin, env);
 }

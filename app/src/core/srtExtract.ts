@@ -1,7 +1,21 @@
 import { Cue, Chapter, Unit, Span } from "./types";
+import { languageProfile } from "./languageProfiles";
 
 const TIME_LINE_PATTERN = /(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})/;
 const TAG_PATTERN = /<[^>]+>|\{[^}]*\}/g;
+const STYLE_TAG_PATTERN = /<\/?(i|b|u)>/gi;
+const STYLE_TAG_PLACEHOLDER = (index: number) => `\u0001${index}\u0001`;
+const STYLE_TAG_PLACEHOLDER_PATTERN = /\u0001(\d+)\u0001/g;
+
+function stripTags(line: string, preserveInlineStyleTags: boolean): string {
+  if (!preserveInlineStyleTags) return line.replace(TAG_PATTERN, "");
+  const preserved: string[] = [];
+  const guarded = line.replace(STYLE_TAG_PATTERN, (tag) => {
+    preserved.push(tag.toLowerCase());
+    return STYLE_TAG_PLACEHOLDER(preserved.length - 1);
+  });
+  return guarded.replace(TAG_PATTERN, "").replace(STYLE_TAG_PLACEHOLDER_PATTERN, (_, i) => preserved[Number(i)]);
+}
 const WHITESPACE_PATTERN = /\s+/g;
 const TERMINAL_PUNCT_PATTERN = /[.!?。！？][’”"')\]」』】）]*\s*$/;
 const TRAILING_CONTINUATION_PATTERN = /(\.{2,}|-{2,}|…)\s*$/;
@@ -16,7 +30,6 @@ const GAP_THRESHOLD_MS = 200;
 const WORD_TOKEN_PATTERN = /[A-Za-z]+(?:['’][A-Za-z]+)*/g;
 const ISOLATED_MAX_CHARS_NON_LATIN = 4;
 const SCENE_ADJACENCY_MS = 1500;
-const SCENE_CHANGE_MS = 30000;
 export const MARKER_TEMPLATE = (id: number) => `\u27e6c${String(id).padStart(4, "0")}\u27e7`;
 
 const MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c";
@@ -31,13 +44,8 @@ const LEADING_ELLIPSIS_PATTERN = /^(\.{2,}|\u2026)/;
 const LEADING_NON_LETTER_PATTERN = /^[^A-Za-z]*/;
 const EDGE_NOTE_PATTERN = new RegExp(`^[${MUSIC_NOTE_CHARS}\\s]+|[${MUSIC_NOTE_CHARS}\\s]+$`, "g");
 
-const LATIN_SOURCE_LANGS = new Set([
-  "en", "es", "fr", "de", "it", "pt", "nl", "pl", "sv", "da", "no", "fi",
-  "ro", "cs", "hu", "tr", "id", "vi", "ms", "tl", "ca", "eu", "gl", "la",
-]);
-
 export function isLatinSource(sourceLang: string | undefined | null): boolean {
-  return LATIN_SOURCE_LANGS.has((sourceLang || "en").split("-")[0].toLowerCase());
+  return languageProfile(sourceLang).enableStutterResolution;
 }
 
 const COLON = ":";
@@ -47,10 +55,6 @@ const NARRATOR_BLOCK_PHRASES = [
   " do ", " want ", "that's ",
 ];
 
-const GLOSSARY_HEADING = "人物与专有名词";
-const SECTION_END_PATTERN = /^##\s/m;
-const TABLE_ROW_PATTERN = /^\|(.+)\|\s*$/;
-const SEPARATOR_ROW_PATTERN = /^[\s|:-]+$/;
 const NAME_SEPARATOR_PATTERN = /[·・]/;
 const TERM_BOUNDARY_LEFT = "(?<![A-Za-z0-9])";
 const TERM_BOUNDARY_RIGHT = "(?![A-Za-z0-9])";
@@ -158,8 +162,8 @@ function firstLetterIsLower(text: string): boolean {
   return Boolean(rest) && rest[0] === rest[0].toLowerCase() && rest[0] !== rest[0].toUpperCase();
 }
 
-function foldText(raw: string, stripSdhEnabled: boolean, latinSource: boolean): string {
-  let lines = raw.split("\n").map((rawLine) => rawLine.replace(TAG_PATTERN, "").replace(WHITESPACE_PATTERN, " ").trim());
+function foldText(raw: string, stripSdhEnabled: boolean, latinSource: boolean, preserveInlineStyleTags: boolean): string {
+  let lines = raw.split("\n").map((rawLine) => stripTags(rawLine, preserveInlineStyleTags).replace(WHITESPACE_PATTERN, " ").trim());
   lines = lines.filter(Boolean);
   if (stripSdhEnabled && latinSource && lines.length && !lines.some((l) => MUSIC_NOTE_PATTERN.test(l))) {
     lines = stripSpeakerTags(lines);
@@ -167,7 +171,7 @@ function foldText(raw: string, stripSdhEnabled: boolean, latinSource: boolean): 
   return lines.filter(Boolean).join(" ");
 }
 
-export function parseSrt(content: string, stripSdhEnabled: boolean, latinSource: boolean) {
+export function parseSrt(content: string, stripSdhEnabled: boolean, latinSource: boolean, preserveInlineStyleTags: boolean) {
   content = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const cues: Cue[] = [];
   const sdhStats = { dropped: 0, stripped: 0 };
@@ -184,7 +188,7 @@ export function parseSrt(content: string, stripSdhEnabled: boolean, latinSource:
     if (timeLineIdx === null) continue;
     const timeMatch = TIME_LINE_PATTERN.exec(lines[timeLineIdx].trim())!;
     const cueId = cues.length + 1;
-    let text = foldText(lines.slice(timeLineIdx + 1).join("\n"), stripSdhEnabled, latinSource);
+    let text = foldText(lines.slice(timeLineIdx + 1).join("\n"), stripSdhEnabled, latinSource, preserveInlineStyleTags);
     if (stripSdhEnabled) {
       const cleaned = stripSdh(text);
       if (cleaned !== text) sdhStats[cleaned ? "stripped" : "dropped"] += 1;
@@ -392,27 +396,7 @@ function groupSegments(segments: Segment[], latinSource: boolean): Segment[][] {
   return groups;
 }
 
-function extractMarkdownSection(content: string, heading: string): string {
-  const match = new RegExp(`^##\\s+${escapeRegExp(heading)}\\s*$`, "m").exec(content);
-  if (!match) return "";
-  const rest = content.slice(match.index + match[0].length);
-  const nextMatch = SECTION_END_PATTERN.exec(rest);
-  return nextMatch ? rest.slice(0, nextMatch.index) : rest;
-}
-
-function parseGlossaryTable(sectionText: string): [string, string][] {
-  const rows: [string, string][] = [];
-  for (const rawLine of sectionText.split("\n")) {
-    const line = rawLine.trim();
-    const rowMatch = TABLE_ROW_PATTERN.exec(line);
-    if (!rowMatch || SEPARATOR_ROW_PATTERN.test(rowMatch[1])) continue;
-    const cells = rowMatch[1].split("|").map((c) => c.trim());
-    if (cells.length >= 2 && cells[0] !== "原文") rows.push([cells[0], cells[1]]);
-  }
-  return rows;
-}
-
-function splitNamePair(original: string, translated: string): [string, string][] {
+export function splitNamePair(original: string, translated: string): [string, string][] {
   const origTokens = original.split(/\s+/).filter(Boolean);
   const transTokens = translated.split(NAME_SEPARATOR_PATTERN).filter(Boolean);
   const pairs: [string, string][] = [[original, translated]];
@@ -420,16 +404,6 @@ function splitNamePair(original: string, translated: string): [string, string][]
     pairs.push([origTokens[0], transTokens[0]]);
   }
   return pairs;
-}
-
-export function buildGlossaryFromMarkdown(content: string): Glossary {
-  const glossary: Glossary = {};
-  for (const [original, translated] of parseGlossaryTable(extractMarkdownSection(content, GLOSSARY_HEADING))) {
-    for (const [term, target] of splitNamePair(original, translated)) {
-      if (term && !(term in glossary)) glossary[term] = target;
-    }
-  }
-  return glossary;
 }
 
 function matchGlossaryTerms(text: string, glossary: Glossary) {
@@ -478,7 +452,7 @@ interface RawChapter {
   groups: Segment[][];
 }
 
-function chapterize(groups: Segment[][]): RawChapter[] {
+function chapterize(groups: Segment[][], sceneChangeMs: number): RawChapter[] {
   const chapters: RawChapter[] = [];
   const openChapter: Record<string, RawChapter> = {};
   const threadEnd: Record<string, number> = {};
@@ -487,7 +461,7 @@ function chapterize(groups: Segment[][]): RawChapter[] {
     const startMs = timeToMs(group[0].start);
     const endMs = timeToMs(group[group.length - 1].end);
     let chapter = openChapter[kind];
-    if (!chapter || startMs - threadEnd[kind] > SCENE_CHANGE_MS) {
+    if (!chapter || startMs - threadEnd[kind] > sceneChangeMs) {
       chapter = { kind, groups: [] };
       chapters.push(chapter);
       openChapter[kind] = chapter;
@@ -498,13 +472,25 @@ function chapterize(groups: Segment[][]): RawChapter[] {
   return chapters;
 }
 
-function buildUnits(cues: Cue[], glossary: Glossary, latinSource: boolean, isolatedMergeMaxWords: number) {
+export function previewChapterCount(cues: Cue[], sceneChangeMs: number): number {
+  if (!cues.length) return 0;
+  let count = 1;
+  let threadEnd = timeToMs(cues[0].end);
+  for (let i = 1; i < cues.length; i++) {
+    const startMs = timeToMs(cues[i].start);
+    if (startMs - threadEnd > sceneChangeMs) count += 1;
+    threadEnd = Math.max(threadEnd, timeToMs(cues[i].end));
+  }
+  return count;
+}
+
+function buildUnits(cues: Cue[], glossary: Glossary, latinSource: boolean, isolatedMergeMaxWords: number, sceneChangeMs: number) {
   const groups = groupSegments(buildSegments(cues, glossary, latinSource, isolatedMergeMaxWords), latinSource);
   const units: Unit[] = [];
   const chapters: Chapter[] = [];
   let markerMerges = 0;
   let unitId = 0;
-  chapterize(groups).forEach((rawChapter, chapterIndex) => {
+  chapterize(groups, sceneChangeMs).forEach((rawChapter, chapterIndex) => {
     const isMusicChapter = rawChapter.kind === "music";
     const memberGroups = isMusicChapter ? [rawChapter.groups.flat()] : rawChapter.groups;
     const unitIds: number[] = [];
@@ -531,21 +517,26 @@ function buildUnits(cues: Cue[], glossary: Glossary, latinSource: boolean, isola
   return { units, chapters, markerMerges };
 }
 
+export const DEFAULT_SCENE_CHANGE_SECONDS = 30;
+
 export interface ExtractOptions {
   stripSdhEnabled?: boolean;
   sourceLang?: string;
   isolatedMergeMaxWords?: number;
+  sceneChangeSeconds?: number;
 }
 
 export function extract(content: string, glossary: Glossary, options: ExtractOptions = {}) {
   const stripSdhEnabled = options.stripSdhEnabled ?? true;
   const sourceLang = options.sourceLang ?? "en";
   const isolatedMergeMaxWords = options.isolatedMergeMaxWords ?? 0;
+  const sceneChangeMs = (options.sceneChangeSeconds ?? DEFAULT_SCENE_CHANGE_SECONDS) * 1000;
+  const profile = languageProfile(sourceLang);
   const latinSource = isLatinSource(sourceLang);
-  const { cues, sdhStats } = parseSrt(content, stripSdhEnabled, latinSource);
+  const { cues, sdhStats } = parseSrt(content, stripSdhEnabled, latinSource, profile.preserveInlineStyleTags);
   if (!cues.length) {
     return { success: false, cues: [], units: [], chapters: [], sdh_removed: sdhStats, marker_merges: 0 };
   }
-  const { units, chapters, markerMerges } = buildUnits(cues, glossary, latinSource, isolatedMergeMaxWords);
+  const { units, chapters, markerMerges } = buildUnits(cues, glossary, latinSource, isolatedMergeMaxWords, sceneChangeMs);
   return { success: true, cues, units, chapters, sdh_removed: sdhStats, marker_merges: markerMerges };
 }
