@@ -1,5 +1,6 @@
 import { Env } from "./env";
 import { reportError } from "./response";
+import { coreLog } from "./core/log";
 
 const UPSTREAM_ENDPOINT = "https://translate-pa.googleapis.com/v1/translateHtml";
 const FALLBACK_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -37,13 +38,18 @@ export async function fetchUpstreamTranslation(env: Env, text: string, source: s
 
 export interface LangResolver {
   note(detected: string | null): void;
+  log(message: string): void;
 }
 
-export function createLangResolver(): LangResolver & { value: string | null } {
+export function createLangResolver(onLog?: (message: string) => void): LangResolver & { value: string | null } {
   return {
     value: null as string | null,
     note(this: { value: string | null }, detected: string | null) {
       if (!this.value && detected) this.value = detected;
+    },
+    log(message: string) {
+      coreLog("translate", message);
+      onLog?.(message);
     },
   };
 }

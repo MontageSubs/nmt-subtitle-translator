@@ -8,9 +8,10 @@ export interface Stats {
   last24h: number;
 }
 
+const BUCKET_MS = 3_600_000;
+
 const SCHEMA_STATEMENTS: { sql: string; args?: number[] }[] = [
-  { sql: "CREATE TABLE IF NOT EXISTS translation_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, count INTEGER NOT NULL, created_at INTEGER NOT NULL)" },
-  { sql: "CREATE INDEX IF NOT EXISTS idx_translation_stats_created_at ON translation_stats(created_at)" },
+  { sql: "CREATE TABLE IF NOT EXISTS translation_stats_hourly (bucket_start INTEGER PRIMARY KEY, count INTEGER NOT NULL)" },
 ];
 
 function pipelineUrl(rawUrl: string): string {
@@ -45,14 +46,18 @@ function extractScalar(result: any, index: number): number {
 
 export async function recordSuccess(config: TursoConfig, count: number): Promise<void> {
   if (count <= 0) return;
-  await execute(config, [{ sql: "INSERT INTO translation_stats (count, created_at) VALUES (?, ?)", args: [count, Date.now()] }]);
+  const bucketStart = Math.floor(Date.now() / BUCKET_MS) * BUCKET_MS;
+  await execute(config, [{
+    sql: "INSERT INTO translation_stats_hourly (bucket_start, count) VALUES (?, ?) ON CONFLICT(bucket_start) DO UPDATE SET count = count + excluded.count",
+    args: [bucketStart, count],
+  }]);
 }
 
 export async function readStats(config: TursoConfig): Promise<Stats> {
-  const dayAgo = Date.now() - 86_400_000;
+  const dayAgoBucket = Math.floor((Date.now() - 86_400_000) / BUCKET_MS) * BUCKET_MS;
   const result = await execute(config, [
-    { sql: "SELECT COALESCE(SUM(count),0) FROM translation_stats" },
-    { sql: "SELECT COALESCE(SUM(count),0) FROM translation_stats WHERE created_at > ?", args: [dayAgo] },
+    { sql: "SELECT COALESCE(SUM(count),0) FROM translation_stats_hourly" },
+    { sql: "SELECT COALESCE(SUM(count),0) FROM translation_stats_hourly WHERE bucket_start > ?", args: [dayAgoBucket] },
   ]);
   return { total: extractScalar(result, 0), last24h: extractScalar(result, 1) };
 }

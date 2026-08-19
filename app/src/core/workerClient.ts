@@ -35,6 +35,60 @@ declare global {
   }
 }
 
+async function readNdjsonStream(response: Response, onLog?: (message: string) => void): Promise<any> {
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result: any = null;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex: number;
+    while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      if (!line) continue;
+      const event = JSON.parse(line);
+      if (event.type === "log") onLog?.(event.message);
+      else if (event.type === "error") {
+        throw new WorkerRequestError(
+          event.fatal ? "响应内容安全校验未通过，任务已中止" : event.message || "translate job failed",
+          !event.fatal, Boolean(event.trigger_turnstile), Boolean(event.fatal)
+        );
+      } else if (event.type === "result") {
+        result = event;
+      }
+    }
+  }
+  if (!result) throw new WorkerRequestError("worker stream ended without a result", true);
+  return result;
+}
+
+async function requestStream(path: string, body: unknown, onLog?: (message: string) => void): Promise<any> {
+  assertConfigured();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${WORKER_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=UTF-8" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      const fatal = payload?.error === "output_blocked";
+      const retryable = !fatal && (response.status === 429 || response.status >= 500);
+      const message = fatal ? "响应内容安全校验未通过，任务已中止" : payload?.error || `worker responded ${response.status}`;
+      throw new WorkerRequestError(message, retryable, Boolean(payload?.trigger_turnstile), fatal);
+    }
+    return await readNdjsonStream(response, onLog);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function request(path: string, body: unknown): Promise<any> {
   assertConfigured();
   const controller = new AbortController();
@@ -170,20 +224,20 @@ export interface TranslateJobResponse {
   missing_cues: number[];
 }
 
-async function attemptTranslateJob(job: TranslateJobPayload): Promise<TranslateJobResponse> {
+async function attemptTranslateJob(job: TranslateJobPayload, onLog?: (message: string) => void): Promise<TranslateJobResponse> {
   const active = await ensureSession();
   session = null;
   const probeBitmap = computeProbeBitmap();
   const wireCues = job.cues.map(({ id, start_ms, end_ms, text }) => ({ id, start_ms, end_ms, text }));
   const answer = await computeAnswer(active.challengeKey, active.nonce, canonicalizeCues(wireCues), probeBitmap);
-  const payload = await request("/translate-job", {
+  const payload = await requestStream("/translate-job", {
     token: active.token,
     answer,
     probeBitmap,
     ...job,
     cues: wireCues,
     ...(clearance ? { clearance } : {}),
-  });
+  }, onLog);
   adoptSession(payload, ACTIVE_TTL_MS);
   return payload as TranslateJobResponse;
 }
@@ -234,6 +288,6 @@ async function withRetry<T>(attempt: () => Promise<T>): Promise<T> {
   }
 }
 
-export function postTranslateJob(job: TranslateJobPayload): Promise<TranslateJobResponse> {
-  return withRetry(() => attemptTranslateJob(job));
+export function postTranslateJob(job: TranslateJobPayload, onLog?: (message: string) => void): Promise<TranslateJobResponse> {
+  return withRetry(() => attemptTranslateJob(job, onLog));
 }

@@ -20,13 +20,45 @@ function auditedSecrets(env: Env): string[] {
   ].filter((value): value is string => typeof value === "string" && value.trim().length >= MIN_AUDITED_SECRET_LENGTH);
 }
 
+export function containsAuditedSecret(serialized: string, env: Env): boolean {
+  return auditedSecrets(env).some((secret) => serialized.includes(secret));
+}
+
 export function json(body: unknown, status: number, origin: string, env: Env): Response {
   const serialized = JSON.stringify(body);
-  if (auditedSecrets(env).some((secret) => serialized.includes(secret))) {
+  if (containsAuditedSecret(serialized, env)) {
     console.error(JSON.stringify({ event: "output_blocked", ts: Date.now() }));
     return new Response(JSON.stringify({ error: "output_blocked" }), { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders(origin) } });
   }
   return new Response(serialized, { status, headers: { "Content-Type": "application/json", ...corsHeaders(origin) } });
+}
+
+export function ndjsonStream(
+  ctx: ExecutionContext, origin: string, env: Env, produce: (emit: (event: object) => Promise<void>) => Promise<void>
+): Response {
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
+  const encoder = new TextEncoder();
+
+  const emit = async (event: object) => {
+    const serialized = JSON.stringify(event);
+    const safe = containsAuditedSecret(serialized, env)
+      ? JSON.stringify({ type: "error", message: "output_blocked", fatal: true })
+      : serialized;
+    await writer.write(encoder.encode(safe + "\n"));
+  };
+
+  ctx.waitUntil((async () => {
+    try {
+      await produce(emit);
+    } catch (e) {
+      await emit({ type: "error", message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      await writer.close();
+    }
+  })());
+
+  return new Response(readable, { status: 200, headers: { "Content-Type": "application/x-ndjson", ...corsHeaders(origin) } });
 }
 
 export async function parseBody<T>(request: Request): Promise<T | null> {

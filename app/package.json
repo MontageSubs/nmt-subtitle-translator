@@ -11,6 +11,7 @@
     "typecheck": "tsc -p . --noEmit"
   },
   "dependencies": {
+    "eld": "^2.1.0",
     "segmentit": "^2.0.3"
   },
   "devDependencies": {

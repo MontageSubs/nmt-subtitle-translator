@@ -7,9 +7,9 @@ import { consumeFreeQuota } from "../reputation";
 import { resolveSecretRing } from "../secret";
 import { consumeNonceOnce } from "../nonce";
 import { hashIp, clientIp } from "../identity";
-import { json, parseBody, logGate, reportError } from "../response";
+import { json, parseBody, logGate, reportError, ndjsonStream } from "../response";
 import { gateForRequest, consumeBurst, escalateOnBurstTrip, consumeRateLimit } from "../gate";
-import { recordTranslatedUnits } from "../stats";
+import { recordCompletedJob } from "../stats";
 import { runTranslateJob } from "../core/pipeline";
 import { Glossary } from "../core/srtExtract";
 import { ProtocolCue, canonicalizeCues, isValidProtocolCue } from "../protocol";
@@ -29,6 +29,7 @@ interface TranslateJobRequestBody {
 const MAX_GLOSSARY_ENTRIES = 500;
 const MAX_GLOSSARY_ENTRY_CHARS = 200;
 const MAX_CUES_PER_REQUEST = 20_000;
+const JOB_SUCCESS_THRESHOLD = 0.95;
 
 function isValidGlossary(value: unknown): value is Glossary {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -119,15 +120,19 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
     reportError("rate limiter unavailable, failing open", e);
   }
 
-  let job: Awaited<ReturnType<typeof runTranslateJob>>;
-  try {
-    job = await runTranslateJob(env, { cues, glossary, source, target, sceneChangeSeconds }, maxBatchChars(env), startedAt);
-  } catch (e) {
-    reportError("translate job failed", e);
-    return json({ error: "translate job failed" }, 502, origin, env);
-  }
+  return ndjsonStream(ctx, origin, env, async (emit) => {
+    let job: Awaited<ReturnType<typeof runTranslateJob>>;
+    try {
+      job = await runTranslateJob(env, { cues, glossary, source, target, sceneChangeSeconds }, maxBatchChars(env), startedAt, (message) => emit({ type: "log", message }));
+    } catch (e) {
+      reportError("translate job failed", e);
+      await emit({ type: "error", message: "translate job failed" });
+      return;
+    }
 
-  recordTranslatedUnits(ctx, env, job.cues.length - job.missing_count);
-  const { token, challengeKey, nonce } = await issueSession(ring, ACTIVE_TTL_MS);
-  return json({ ...job, token, challengeKey, nonce }, 200, origin, env);
+    const completionRatio = job.cues.length ? (job.cues.length - job.missing_count) / job.cues.length : 0;
+    if (job.success && completionRatio >= JOB_SUCCESS_THRESHOLD) recordCompletedJob(ctx, env);
+    const { token, challengeKey, nonce } = await issueSession(ring, ACTIVE_TTL_MS);
+    await emit({ type: "result", ...job, token, challengeKey, nonce });
+  });
 }

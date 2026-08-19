@@ -237,7 +237,7 @@ async function translate(
 
   if (missing.length) {
     const missingCues = [...new Set(missing.map(cueRef))].sort();
-    log(`retry round: resending ${missing.length} missing unit(s) individually, cues: ${missingCues.join(", ")}`);
+    resolver.log(`retry round: resending ${missing.length} missing unit(s) individually, cues: ${missingCues.join(", ")}`);
     const missingSet = new Set(missing);
     const filteredGroups = chapterGroups.map((g) => g.filter((id) => missingSet.has(id))).filter((g) => g.length);
     const filteredItems = items.filter((i) => missingSet.has(i.id));
@@ -553,6 +553,7 @@ async function retryIsolatedCuesMerged(
 export interface TranslateUnitsOptions {
   maxChars: number;
   startedAt: number;
+  onLog?: (message: string) => void;
 }
 
 export async function translateUnits(
@@ -561,7 +562,7 @@ export async function translateUnits(
 ): Promise<{ translations: Record<string, string>; skipped: (string | number)[]; resolvedSourceLang: string }> {
   const maxChars = Math.floor(options.maxChars * BATCH_PACK_RATIO);
   const { startedAt } = options;
-  const resolver = createLangResolver();
+  const resolver = createLangResolver(options.onLog);
   const resolved = new Map(units.filter((u) => u.resolved !== null).map((u) => [u.id, u.resolved as string]));
   const pending = units.filter((u) => u.resolved === null);
   const chapterOfUnit = new Map<number, number>();
@@ -583,7 +584,7 @@ export async function translateUnits(
   }
 
   if (untranslatedCandidates.length) {
-    log(`untranslated-script retry: resending ${untranslatedCandidates.length} unit(s) in one merged request`);
+    resolver.log(`untranslated-script retry: resending ${untranslatedCandidates.length} unit(s) in one merged request`);
     const recovered = await retryUntranslated(env, untranslatedCandidates, sourceLang, targetLang, maxChars, startedAt, resolver);
     for (const { unit } of untranslatedCandidates) {
       const candidate = recovered.get(unit.id);
@@ -606,7 +607,7 @@ export async function translateUnits(
   const suspects = [...new Set([...lengthSuspects, ...cueSuspects])].sort((a, b) => a - b);
 
   if (suspects.length) {
-    log(`windowed retry: resending context around ${suspects.length} suspect unit(s) in one merged request`);
+    resolver.log(`windowed retry: resending context around ${suspects.length} suspect unit(s) in one merged request`);
     const recovered = await retryWindowedMerged(env, units, suspects, sourceLang, targetLang, maxChars, startedAt, resolver);
     for (const [uid, text] of recovered) results.set(uid, text);
 
@@ -619,13 +620,13 @@ export async function translateUnits(
     }
 
     if (missingByUnit.size) {
-      log(`isolated cue retry: resending cues for ${missingByUnit.size} unit(s) in one merged request`);
+      resolver.log(`isolated cue retry: resending cues for ${missingByUnit.size} unit(s) in one merged request`);
       const recoveredCues = await retryIsolatedCuesMerged(env, missingByUnit, cueOrder, cueTextById, sourceLang, targetLang, maxChars, startedAt, resolver);
       for (const [uid, cueIds] of missingByUnit) {
         const unitRecovered = new Map([...recoveredCues].filter(([cid]) => cueIds.includes(cid)));
         if (unitRecovered.size) {
           results.set(uid, patchMissingCues(results.get(uid) as string, expectedCueIds(unitById.get(uid)!), unitRecovered));
-          log(`isolated cue retry: unit ${uid} recovered cues ${[...unitRecovered.keys()].sort((a, b) => a - b)}`);
+          resolver.log(`isolated cue retry: unit ${uid} recovered cues ${[...unitRecovered.keys()].sort((a, b) => a - b)}`);
         }
       }
     }

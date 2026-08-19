@@ -18,7 +18,7 @@ export interface TranslateJobResult extends MergeResult {
 }
 
 export async function runTranslateJob(
-  env: Env, job: TranslateJobRequest, maxChars: number, startedAt: number
+  env: Env, job: TranslateJobRequest, maxChars: number, startedAt: number, onLog?: (message: string) => void
 ): Promise<TranslateJobResult> {
   const extracted = extract(job.cues, job.glossary, { sourceLang: job.source, sceneChangeSeconds: job.sceneChangeSeconds });
   if (!extracted.success) {
@@ -26,7 +26,7 @@ export async function runTranslateJob(
   }
 
   const { translations, resolvedSourceLang } = await translateUnits(
-    env, extracted.units, extracted.chapters, extracted.cues, job.source, job.target, { maxChars, startedAt }
+    env, extracted.units, extracted.chapters, extracted.cues, job.source, job.target, { maxChars, startedAt, onLog }
   );
   const merged = await merge(extracted.cues, extracted.units, translations, job.source, job.target);
 

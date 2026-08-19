@@ -5,6 +5,7 @@ import { SOURCE_LANGUAGES, TARGET_LANGUAGES, AUTO_DETECT_CODE, defaultOutputMode
 import { Cue, OutputMode } from "./core/types";
 import { handshake, postTranslateJob, TranslateJobResponse } from "./core/workerClient";
 import { applySdhStripping } from "./core/sdh";
+import { detectSourceLanguage, isKnownSourceLanguage } from "./core/detect";
 import { loadBundledDictionary, entriesToGlossary, DictionaryEntry } from "./core/dictionary";
 import { mountGlossaryEditor } from "./components/glossaryEditor";
 import { openPreviewModal, PreviewCard } from "./components/previewModal";
@@ -267,8 +268,20 @@ function wireApp() {
     state.lastCues = parseSrt(content);
     updateScenePreview();
 
-    detectHint.textContent = sourceSelect.value === AUTO_DETECT_CODE ? t("detect.auto") : "";
-    detectHint.classList.remove("detect-hint--done");
+    if (sourceSelect.value === AUTO_DETECT_CODE) {
+      const detected = await detectSourceLanguage(state.lastCues);
+      if (detected && detected.reliable && isKnownSourceLanguage(detected.code)) {
+        sourceSelect.value = detected.code;
+        state.sourceLang = detected.code;
+        loadDictionaryFor(detected.code);
+        detectHint.textContent = t("detect.done", { label: languageProfile(detected.code).label, code: detected.code });
+        detectHint.classList.add("detect-hint--done");
+      } else {
+        detectHint.textContent = t("detect.auto");
+        detectHint.classList.remove("detect-hint--done");
+      }
+      updateOutputModeVisibility();
+    }
   }
 
   srtInput.addEventListener("change", () => { if (srtInput.files?.[0]) handleFile(srtInput.files[0]); });
@@ -305,7 +318,7 @@ function wireApp() {
       const glossary = entriesToGlossary(state.glossaryEntries);
 
       const { cues: wireCues } = applySdhStripping(state.lastCues, sourceLang, stripSdhEnabled);
-      const job = await postTranslateJob({ cues: wireCues, glossary, source: sourceLang, target: targetLang, sceneChangeSeconds });
+      const job = await postTranslateJob({ cues: wireCues, glossary, source: sourceLang, target: targetLang, sceneChangeSeconds }, appendLog);
       if (!job.success) throw new Error(t("error.parseFailed"));
       state.lastJobResult = job;
       state.lastRenderMode = outputMode;

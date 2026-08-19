@@ -1,5 +1,3 @@
-@import url("https://cdnjs.cloudflare.com/ajax/libs/jetbrains-mono/2.304/css/jetbrains-mono.min.css");
-
 :root {
   color-scheme: light;
   --paper: #faf9f6;
@@ -11,7 +9,7 @@
   --accent-ink: #fdf6f0;
   --ok: #3f6b4a;
   --radius: 10px;
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
