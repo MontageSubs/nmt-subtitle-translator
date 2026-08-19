@@ -15,7 +15,7 @@ export const zh = {
   "outputMode.bilingual": "双语（原文 + 译文）",
   "outputMode.monolingual": "仅译文",
   "lang.autoDetect": "自动检测",
-  "detect.detecting": "识别中…",
+  "detect.auto": "翻译时将自动识别源语言",
   "detect.done": "已识别为 {label}（{code}），可手动更改",
   "detect.unknown": "识别结果 {code} 暂无专属规则，按通用规则处理",
   "detect.unavailable": "自动识别暂不可用，请手动选择源语言",

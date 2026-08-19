@@ -17,7 +17,7 @@ export const en: Record<keyof typeof zh, string> = {
   "outputMode.bilingual": "Bilingual (source + translation)",
   "outputMode.monolingual": "Translation only",
   "lang.autoDetect": "Auto-detect",
-  "detect.detecting": "Detecting…",
+  "detect.auto": "Source language will be resolved automatically when translating",
   "detect.done": "Detected as {label} ({code}), you can change it manually",
   "detect.unknown": "Detected {code}, no dedicated rules yet — using generic handling",
   "detect.unavailable": "Auto-detection unavailable, please choose the source language manually",

@@ -1,15 +1,15 @@
 import "./style.css";
-import { DEFAULT_SCENE_CHANGE_SECONDS, previewChapterCount, parseSrtPreview } from "./core/srtPreview";
-import { renderSrt } from "./core/srtRender";
+import { DEFAULT_SCENE_CHANGE_SECONDS, previewChapterCount, parseSrt } from "./core/srtParse";
+import { renderSrt, msToSrtTime } from "./core/srtRender";
 import { SOURCE_LANGUAGES, TARGET_LANGUAGES, AUTO_DETECT_CODE, defaultOutputMode, languageProfile } from "./core/languageProfiles";
 import { Cue, OutputMode } from "./core/types";
-import { handshake, bufferSuccess, detectLanguage, postTranslateJob, TranslateJobResponse } from "./core/workerClient";
+import { handshake, postTranslateJob, TranslateJobResponse } from "./core/workerClient";
+import { applySdhStripping } from "./core/sdh";
 import { loadBundledDictionary, entriesToGlossary, DictionaryEntry } from "./core/dictionary";
 import { mountGlossaryEditor } from "./components/glossaryEditor";
 import { openPreviewModal, PreviewCard } from "./components/previewModal";
 import { t, getLocale, setLocale, onLocaleChange, LocaleCode } from "./i18n";
 
-const SUCCESS_COMPLETION_THRESHOLD = 0.95;
 const SCENE_SECONDS_MIN = 1;
 const SCENE_SECONDS_MAX = 99999;
 const SCENE_SLIDER_MIN = 5;
@@ -21,7 +21,6 @@ const app = document.getElementById("app")!;
 // 切换 locale 时整体重渲染最简单可靠，但不能丢用户已经做的选择，所以状态提到渲染函数之外。
 interface AppState {
   srtFile: File | null;
-  srtContent: string;
   lastCues: Cue[];
   lastJobResult: TranslateJobResponse | null;
   lastRenderMode: OutputMode;
@@ -36,7 +35,6 @@ interface AppState {
 
 const state: AppState = {
   srtFile: null,
-  srtContent: "",
   lastCues: [],
   lastJobResult: null,
   lastRenderMode: "monolingual",
@@ -223,6 +221,8 @@ function wireApp() {
   sourceSelect.addEventListener("change", () => {
     state.sourceLang = sourceSelect.value;
     updateOutputModeVisibility();
+    detectHint.textContent = sourceSelect.value === AUTO_DETECT_CODE && state.srtFile ? t("detect.auto") : "";
+    detectHint.classList.remove("detect-hint--done");
     if (sourceSelect.value !== AUTO_DETECT_CODE) loadDictionaryFor(sourceSelect.value);
   });
 
@@ -258,37 +258,17 @@ function wireApp() {
 
   async function handleFile(file: File) {
     state.srtFile = file;
-    state.srtContent = await file.text();
+    const content = await file.text();
     dropzoneFile.textContent = t("dropzone.selected", { name: file.name });
     langStep.hidden = false;
     optionsStep.hidden = false;
     startStep.hidden = false;
 
-    const cues = parseSrtPreview(state.srtContent);
-    state.lastCues = cues;
+    state.lastCues = parseSrt(content);
     updateScenePreview();
 
-    if (sourceSelect.value === AUTO_DETECT_CODE) {
-      detectHint.textContent = t("detect.detecting");
-      detectHint.classList.remove("detect-hint--done");
-      const sample = cues.slice(0, 20).map((c) => c.text).join(" ");
-      const detected = await detectLanguage(sample);
-      if (detected) {
-        const known = SOURCE_LANGUAGES.some((l) => l.code === detected.split("-")[0]);
-        detectHint.textContent = known
-          ? t("detect.done", { label: languageProfile(detected).label, code: detected })
-          : t("detect.unknown", { code: detected });
-        detectHint.classList.add("detect-hint--done");
-        if (known) {
-          sourceSelect.value = detected.split("-")[0];
-          state.sourceLang = sourceSelect.value;
-          loadDictionaryFor(sourceSelect.value);
-        }
-      } else {
-        detectHint.textContent = t("detect.unavailable");
-      }
-      updateOutputModeVisibility();
-    }
+    detectHint.textContent = sourceSelect.value === AUTO_DETECT_CODE ? t("detect.auto") : "";
+    detectHint.classList.remove("detect-hint--done");
   }
 
   srtInput.addEventListener("change", () => { if (srtInput.files?.[0]) handleFile(srtInput.files[0]); });
@@ -314,7 +294,7 @@ function wireApp() {
     progressCount.textContent = "";
 
     try {
-      const sourceLang = sourceSelect.value === AUTO_DETECT_CODE ? "en" : sourceSelect.value;
+      const sourceLang = sourceSelect.value;
       const targetLang = targetSelect.value;
       const outputMode = outputModeSelect.value as OutputMode;
       const sceneChangeSeconds = state.sceneSeconds;
@@ -324,14 +304,24 @@ function wireApp() {
       state.glossaryEntries = glossaryHandle.getEntries() as DictionaryEntry[];
       const glossary = entriesToGlossary(state.glossaryEntries);
 
-      const job = await postTranslateJob({ content: state.srtContent, glossary, source: sourceLang, target: targetLang, stripSdhEnabled, sceneChangeSeconds });
+      const { cues: wireCues } = applySdhStripping(state.lastCues, sourceLang, stripSdhEnabled);
+      const job = await postTranslateJob({ cues: wireCues, glossary, source: sourceLang, target: targetLang, sceneChangeSeconds });
       if (!job.success) throw new Error(t("error.parseFailed"));
       state.lastJobResult = job;
       state.lastRenderMode = outputMode;
 
+      if (sourceLang === AUTO_DETECT_CODE) {
+        const known = SOURCE_LANGUAGES.some((l) => l.code === job.resolved_source_lang.split("-")[0]);
+        detectHint.textContent = known
+          ? t("detect.done", { label: languageProfile(job.resolved_source_lang).label, code: job.resolved_source_lang })
+          : t("detect.unknown", { code: job.resolved_source_lang });
+        detectHint.classList.add("detect-hint--done");
+      }
+
       progressBar.value = 100;
       progressLabel.textContent = t("progress.merging");
-      const srt = renderSrt(job.cues, outputMode);
+      const originalById = new Map(state.lastCues.map((c) => [c.id, c]));
+      const srt = renderSrt(job.cues, originalById, outputMode);
 
       const blob = new Blob([srt], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
@@ -343,11 +333,6 @@ function wireApp() {
       });
       resultCard.hidden = false;
       progressLabel.textContent = t("progress.done");
-
-      const completionRatio = job.cues.length ? (job.cues.length - job.missing_count) / job.cues.length : 0;
-      if (completionRatio >= SUCCESS_COMPLETION_THRESHOLD) {
-        downloadLink.addEventListener("click", () => bufferSuccess(), { once: true });
-      }
     } catch (e) {
       appendLog(t("error.prefix", { message: e instanceof Error ? e.message : String(e) }));
       progressLabel.textContent = t("progress.failed");
@@ -359,9 +344,10 @@ function wireApp() {
   previewButton.addEventListener("click", () => {
     if (!state.lastJobResult) return;
     const cards: PreviewCard[] = state.lastJobResult.cues.map((c) => ({
-      id: c.id, start: c.start, end: c.end, source: c.text, target: c.translation || t("preview.missing"),
+      id: c.id, start: msToSrtTime(c.start_ms), end: msToSrtTime(c.end_ms), source: c.text, target: c.translation || t("preview.missing"),
     }));
-    openPreviewModal(renderSrt(state.lastJobResult.cues, state.lastRenderMode), cards);
+    const originalById = new Map(state.lastCues.map((c) => [c.id, c]));
+    openPreviewModal(renderSrt(state.lastJobResult.cues, originalById, state.lastRenderMode), cards);
   });
 }
 

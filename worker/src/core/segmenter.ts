@@ -1,28 +1,68 @@
-import type { Segment as SegmentInstance } from "segmentit";
-
 export type SyncCutter = (text: string) => string[];
 
-let segmentPromise: Promise<SegmentInstance | null> | null = null;
+interface SegmenterAdapter {
+  cut: SyncCutter;
+  registerTerm?(term: string): void;
+}
 
-async function loadSegmenter(): Promise<SegmentInstance | null> {
-  if (!segmentPromise) {
-    segmentPromise = import("segmentit")
-      .then(({ Segment, useDefault }) => useDefault(new Segment()))
-      .catch((e) => {
-        console.warn("segmentit unavailable, falling back to punctuation boundaries:", e);
-        return null;
-      });
+/**
+ * 分词器仅用于译文回填时寻找合法切分点（架构蓝图 §6），不追求形态学精确度。
+ * 空格分隔的文字系统（拉丁语系、西里尔字母、韩语 eojeol）已由 bilingualMerge.ts
+ * 的空白符回退逻辑覆盖，此处只登记真正需要专用分词器的连写文字系统。
+ */
+async function loadZhAdapter(): Promise<SegmenterAdapter | null> {
+  try {
+    const { Segment, useDefault } = await import("segmentit");
+    const segment = useDefault(new Segment());
+    return {
+      cut: (text) => segment.doSegment(text).map((token) => token.w),
+      registerTerm: (term) => { if (term) segment.loadDict(`${term}|${segment.POSTAG.D_N}|1000`); },
+    };
+  } catch (e) {
+    console.warn("segmentit unavailable, falling back to punctuation boundaries:", e);
+    return null;
   }
-  return segmentPromise;
 }
 
-export async function getSyncCutter(): Promise<SyncCutter | null> {
-  const segment = await loadSegmenter();
-  return segment ? (text: string) => segment.doSegment(text).map((token) => token.w) : null;
+async function loadJaAdapter(): Promise<SegmenterAdapter | null> {
+  try {
+    const mod = await import("tiny-segmenter");
+    const Ctor = mod.default;
+    const instance = new Ctor();
+    return { cut: (text) => instance.segment(text) };
+  } catch (e) {
+    console.warn("tiny-segmenter unavailable, falling back to punctuation boundaries:", e);
+    return null;
+  }
 }
 
-export async function registerGlossaryTerm(term: string): Promise<void> {
-  const segment = await loadSegmenter();
-  if (!segment || !term) return;
-  segment.loadDict(`${term}|${segment.POSTAG.D_N}|1000`);
+const ADAPTER_LOADERS: Record<string, () => Promise<SegmenterAdapter | null>> = {
+  zh: loadZhAdapter,
+  ja: loadJaAdapter,
+};
+
+const adapterCache = new Map<string, Promise<SegmenterAdapter | null>>();
+
+function segmenterKey(langCode: string): string | null {
+  const base = (langCode || "").split("-")[0].toLowerCase();
+  return base in ADAPTER_LOADERS ? base : null;
+}
+
+function loadAdapter(key: string): Promise<SegmenterAdapter | null> {
+  if (!adapterCache.has(key)) adapterCache.set(key, ADAPTER_LOADERS[key]());
+  return adapterCache.get(key)!;
+}
+
+export async function getSyncCutter(targetLang: string): Promise<SyncCutter | null> {
+  const key = segmenterKey(targetLang);
+  if (!key) return null;
+  const adapter = await loadAdapter(key);
+  return adapter?.cut ?? null;
+}
+
+export async function registerGlossaryTerm(targetLang: string, term: string): Promise<void> {
+  const key = segmenterKey(targetLang);
+  if (!key) return;
+  const adapter = await loadAdapter(key);
+  adapter?.registerTerm?.(term);
 }

@@ -1,8 +1,9 @@
 export interface Cue {
   id: number;
-  start: string;
-  end: string;
+  start_ms: number;
+  end_ms: number;
   text: string;
+  position?: string;
 }
 
 export type OutputMode = "bilingual" | "monolingual";

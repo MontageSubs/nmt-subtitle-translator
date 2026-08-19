@@ -5,7 +5,6 @@ import { pruneNonceGuard } from "./nonce";
 import { pruneRetryTokenGuard } from "./retryTokenGuard";
 import { rotateSecret, ROTATION_CRON } from "./rotate";
 import { handleHandshake } from "./handlers/handshake";
-import { handleTranslate } from "./handlers/translate";
 import { handleTranslateJob } from "./handlers/translateJob";
 import { handleTurnstile } from "./handlers/turnstile";
 
@@ -24,7 +23,6 @@ export default {
 
       const path = new URL(request.url).pathname;
       if (path === "/handshake") return await handleHandshake(request, env, ctx, origin);
-      if (path === "/translate") return await handleTranslate(request, env, ctx, origin);
       if (path === "/translate-job") return await handleTranslateJob(request, env, ctx, origin);
       if (path === "/turnstile") return await handleTurnstile(request, env, ctx, origin);
       return json({ error: "not found" }, 404, origin, env);

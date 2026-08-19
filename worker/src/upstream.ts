@@ -35,7 +35,22 @@ export async function fetchUpstreamTranslation(env: Env, text: string, source: s
   return { translatedHtml, detectedLang: source === "auto" ? extractDetectedLang(payload) : null };
 }
 
-export async function fanOutTranslations(env: Env, texts: string[], source: string, target: string, budgetMs: number): Promise<(string | null)[]> {
+export interface LangResolver {
+  note(detected: string | null): void;
+}
+
+export function createLangResolver(): LangResolver & { value: string | null } {
+  return {
+    value: null as string | null,
+    note(this: { value: string | null }, detected: string | null) {
+      if (!this.value && detected) this.value = detected;
+    },
+  };
+}
+
+export async function fanOutTranslations(
+  env: Env, texts: string[], source: string, target: string, budgetMs: number, resolver?: LangResolver
+): Promise<(string | null)[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), budgetMs);
   const results: (string | null)[] = new Array(texts.length).fill(null);
@@ -44,7 +59,9 @@ export async function fanOutTranslations(env: Env, texts: string[], source: stri
     while (cursor < texts.length) {
       const i = cursor++;
       try {
-        results[i] = (await fetchUpstreamTranslation(env, texts[i], source, target, controller.signal)).translatedHtml;
+        const upstream = await fetchUpstreamTranslation(env, texts[i], source, target, controller.signal);
+        results[i] = upstream.translatedHtml;
+        resolver?.note(upstream.detectedLang);
       } catch (e) {
         reportError(`upstream batch ${i} failed`, e);
       }

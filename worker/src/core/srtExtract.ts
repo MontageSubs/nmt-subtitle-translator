@@ -1,7 +1,7 @@
 import { Cue, Chapter, Unit, Span } from "./types";
 import { languageProfile } from "./languageProfiles";
+import { ProtocolCue } from "../protocol";
 
-const TIME_LINE_PATTERN = /(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})/;
 const TAG_PATTERN = /<[^>]+>|\{[^}]*\}/g;
 const STYLE_TAG_PATTERN = /<\/?(i|b|u)>/gi;
 const STYLE_TAG_PLACEHOLDER = (index: number) => `\u0001${index}\u0001`;
@@ -34,12 +34,6 @@ export const MARKER_TEMPLATE = (id: number) => `\u27e6c${String(id).padStart(4, 
 
 const MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c";
 const MUSIC_NOTE_PATTERN = new RegExp(`[${MUSIC_NOTE_CHARS}]`);
-const MUSIC_NOTE_PATTERN_G = new RegExp(`[${MUSIC_NOTE_CHARS}]`, "g");
-const INNER_B = "\\[\\]\\(\\)\\{\\}\uff08\uff09\u3010\u3011";
-const SDH_BRACKET_PATTERN = new RegExp(
-  `\\[[^${INNER_B}]*\\]|\\([^${INNER_B}]*\\)|\\{[^${INNER_B}]*\\}|\uff08[^${INNER_B}]*\uff09|\u3010[^${INNER_B}]*\u3011`,
-  "g"
-);
 const LEADING_ELLIPSIS_PATTERN = /^(\.{2,}|\u2026)/;
 const LEADING_NON_LETTER_PATTERN = /^[^A-Za-z]*/;
 const EDGE_NOTE_PATTERN = new RegExp(`^[${MUSIC_NOTE_CHARS}\\s]+|[${MUSIC_NOTE_CHARS}\\s]+$`, "g");
@@ -48,13 +42,6 @@ export function isLatinSource(sourceLang: string | undefined | null): boolean {
   return languageProfile(sourceLang).enableStutterResolution;
 }
 
-const COLON = ":";
-const NARRATOR_BLOCK_PHRASES = [
-  "previously on", "improved by", " is ", " are ", " were ", " was ",
-  " think ", " guess ", " will ", " believe ", " say ", " said ",
-  " do ", " want ", "that's ",
-];
-
 const NAME_SEPARATOR_PATTERN = /[·・]/;
 const TERM_BOUNDARY_LEFT = "(?<![A-Za-z0-9])";
 const TERM_BOUNDARY_RIGHT = "(?![A-Za-z0-9])";
@@ -62,84 +49,9 @@ const EMBED_RATIO_DEFAULT = 0.0;
 
 export type Glossary = Record<string, string>;
 
-function timeToMs(value: string): number {
-  const [hh, mm, rest] = value.replace(".", ",").split(":");
-  const [ss, ms] = rest.split(",");
-  return ((Number(hh) * 60 + Number(mm)) * 60 + Number(ss)) * 1000 + Number(ms);
-}
-
 function stripLetterStutter(text: string): string {
   text = text.replace(STUTTER_WORD_PATTERN, "$1");
   return text.replace(STUTTER_PREFIX_PATTERN, "");
-}
-
-function isAllUppercase(text: string): boolean {
-  return /[A-Za-z]/.test(text) && text.toUpperCase() === text;
-}
-
-function isInsideColonBrackets(line: string, index: number): boolean {
-  let idx = line.lastIndexOf("(", index - 1);
-  if (idx >= 0 && line.indexOf(")", idx) > index) return true;
-  idx = line.lastIndexOf("[", index - 1);
-  if (idx >= 0 && line.indexOf("]", idx) > index) return true;
-  return false;
-}
-
-function isBetweenDigits(line: string, index: number): boolean {
-  return index > 0 && index < line.length - 1 && /\d/.test(line[index - 1]) && /\d/.test(line[index + 1]);
-}
-
-function isTrailingColonOnly(line: string): boolean {
-  return !line.replace(/:+$/, "").includes(COLON);
-}
-
-function shouldRemoveNarrator(pre: string): boolean {
-  const lowered = pre.toLowerCase();
-  if (pre.length > 30 || lowered.includes("http") || pre.includes(", ")) return false;
-  if (pre.length > 15 && NARRATOR_BLOCK_PHRASES.some((p) => lowered.includes(p))) return false;
-  return true;
-}
-
-function stripSpeakerTagLine(line: string, lines: string[], index: number): string {
-  if (!line.includes(COLON)) return line;
-  const indexOfColon = line.indexOf(COLON);
-  const isLastLine = index === lines.length - 1;
-  if (indexOfColon <= 0 || isInsideColonBrackets(line, indexOfColon)) return line;
-  if (isLastLine && isTrailingColonOnly(line) && (line.match(/ /g) || []).length > 1) return line;
-  const pre = line.slice(0, indexOfColon);
-  if (!isAllUppercase(pre)) return line;
-  if (isBetweenDigits(line, indexOfColon)) return line;
-  if (!shouldRemoveNarrator(pre)) return line;
-  if (lines.length === 2 && index === 1) {
-    const firstLine = lines[0].replace(/"+$/, "");
-    if (!/[.!?\u266a\u266b]$|--$|\u2014$/.test(firstLine)) return line;
-  }
-  let content = line.slice(indexOfColon + 1).trim();
-  if (!content) return "";
-  if (content[0] === content[0].toLowerCase() && content[0] !== content[0].toUpperCase()) {
-    content = content[0].toUpperCase() + content.slice(1);
-  }
-  return content;
-}
-
-function stripSpeakerTags(lines: string[]): string[] {
-  const joined = lines.join("\n");
-  if (joined.length > 10 && joined.endsWith(COLON) && !isAllUppercase(joined)) return lines;
-  return lines.map((line, i) => stripSpeakerTagLine(line, lines, i));
-}
-
-function stripSdh(text: string): string {
-  const original = text;
-  while (true) {
-    const newText = text.replace(SDH_BRACKET_PATTERN, "");
-    if (newText === text) break;
-    text = newText;
-  }
-  const cleaned = text.replace(WHITESPACE_PATTERN, " ").trim();
-  if (!cleaned && MUSIC_NOTE_PATTERN.test(original)) {
-    return (original.match(MUSIC_NOTE_PATTERN_G) || []).join(" ");
-  }
-  return cleaned;
 }
 
 export function isMusicSegment(text: string): boolean {
@@ -162,41 +74,18 @@ function firstLetterIsLower(text: string): boolean {
   return Boolean(rest) && rest[0] === rest[0].toLowerCase() && rest[0] !== rest[0].toUpperCase();
 }
 
-function foldText(raw: string, stripSdhEnabled: boolean, latinSource: boolean, preserveInlineStyleTags: boolean): string {
-  let lines = raw.split("\n").map((rawLine) => stripTags(rawLine, preserveInlineStyleTags).replace(WHITESPACE_PATTERN, " ").trim());
-  lines = lines.filter(Boolean);
-  if (stripSdhEnabled && latinSource && lines.length && !lines.some((l) => MUSIC_NOTE_PATTERN.test(l))) {
-    lines = stripSpeakerTags(lines);
-  }
+function foldText(raw: string, preserveInlineStyleTags: boolean): string {
+  const lines = raw.split("\n").map((rawLine) => stripTags(rawLine, preserveInlineStyleTags).replace(WHITESPACE_PATTERN, " ").trim());
   return lines.filter(Boolean).join(" ");
 }
 
-export function parseSrt(content: string, stripSdhEnabled: boolean, latinSource: boolean, preserveInlineStyleTags: boolean) {
-  content = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+function prepareCues(protocolCues: ProtocolCue[], preserveInlineStyleTags: boolean): Cue[] {
   const cues: Cue[] = [];
-  const sdhStats = { dropped: 0, stripped: 0 };
-  for (const block of content.trim().split(/\n\s*\n/)) {
-    const lines = block.replace(/^\n+|\n+$/g, "").split("\n");
-    if (!lines.length) continue;
-    let timeLineIdx: number | null = null;
-    for (const idx of [0, 1]) {
-      if (idx < lines.length && TIME_LINE_PATTERN.test(lines[idx].trim())) {
-        timeLineIdx = idx;
-        break;
-      }
-    }
-    if (timeLineIdx === null) continue;
-    const timeMatch = TIME_LINE_PATTERN.exec(lines[timeLineIdx].trim())!;
-    const cueId = cues.length + 1;
-    let text = foldText(lines.slice(timeLineIdx + 1).join("\n"), stripSdhEnabled, latinSource, preserveInlineStyleTags);
-    if (stripSdhEnabled) {
-      const cleaned = stripSdh(text);
-      if (cleaned !== text) sdhStats[cleaned ? "stripped" : "dropped"] += 1;
-      text = cleaned;
-    }
-    if (text) cues.push({ id: cueId, start: timeMatch[1], end: timeMatch[2], text });
+  for (const raw of protocolCues) {
+    const text = foldText(raw.text, preserveInlineStyleTags);
+    if (text) cues.push({ id: raw.id, start_ms: raw.start_ms, end_ms: raw.end_ms, text });
   }
-  return { cues, sdhStats };
+  return cues;
 }
 
 function splitDialogue(text: string): string[] {
@@ -246,8 +135,8 @@ function isIsolatedShort(text: string, latinSource: boolean, isolatedMergeMaxWor
 interface Segment {
   cue_id: number;
   text: string;
-  start: string;
-  end: string;
+  start_ms: number;
+  end_ms: number;
   resolved: string | null;
   dash_index: number;
   marker_boundary?: boolean;
@@ -258,14 +147,14 @@ function assignMergeSides(segments: Segment[], latinSource: boolean, isolatedMer
   segments.forEach((seg, i) => {
     if (seg.resolved || isMusicSegment(seg.text) || !isIsolatedShort(seg.text, latinSource, isolatedMergeMaxWords)) return;
     if (i + 1 < segments.length && !isMusicSegment(segments[i + 1].text)) {
-      const gapNext = timeToMs(segments[i + 1].start) - timeToMs(seg.end);
+      const gapNext = segments[i + 1].start_ms - seg.end_ms;
       if (gapNext <= SCENE_ADJACENCY_MS) {
         seg.merge_side = "next";
         return;
       }
     }
     if (i > 0 && !isMusicSegment(segments[i - 1].text)) {
-      const gapPrev = timeToMs(seg.start) - timeToMs(segments[i - 1].end);
+      const gapPrev = seg.start_ms - segments[i - 1].end_ms;
       if (gapPrev <= SCENE_ADJACENCY_MS) seg.merge_side = "prev";
     }
   });
@@ -280,7 +169,7 @@ function mergeReason(prevSeg: Segment, currSeg: Segment, latinSource: boolean): 
   if (prevIsMusic && currIsMusic) return musicContinuation(currSeg.text) ? "music" : null;
   if (prevSeg.merge_side === "next" || currSeg.merge_side === "prev") return "marker";
   if (hasTerminalPunct(prevSeg.text)) return null;
-  const gap = timeToMs(currSeg.start) - timeToMs(prevSeg.end);
+  const gap = currSeg.start_ms - prevSeg.end_ms;
   return gap <= GAP_THRESHOLD_MS || firstLetterIsLower(currSeg.text) ? "gap" : null;
 }
 
@@ -340,7 +229,7 @@ function buildSegments(cues: Cue[], glossary: Glossary, latinSource: boolean, is
       let resolved = findPureGlossaryLine(part, glossary, latinSource);
       if (!resolved && latinSource) resolved = findStutterResolution(part, glossary);
       const text = resolved || !latinSource ? part : stripLetterStutter(part);
-      segments.push({ cue_id: cue.id, text, start: cue.start, end: cue.end, resolved, dash_index: dashIndex });
+      segments.push({ cue_id: cue.id, text, start_ms: cue.start_ms, end_ms: cue.end_ms, resolved, dash_index: dashIndex });
     });
   }
   return assignMergeSides(segments, latinSource, isolatedMergeMaxWords);
@@ -365,7 +254,7 @@ function groupSegments(segments: Segment[], latinSource: boolean): Segment[][] {
     let merged = false;
     if (current.length) {
       if (quotePending) {
-        const gap = timeToMs(seg.start) - timeToMs(current[current.length - 1].end);
+        const gap = seg.start_ms - current[current.length - 1].end_ms;
         merged = gap <= SCENE_ADJACENCY_MS;
       }
       if (!merged) {
@@ -458,8 +347,8 @@ function chapterize(groups: Segment[][], sceneChangeMs: number): RawChapter[] {
   const threadEnd: Record<string, number> = {};
   for (const group of groups) {
     const kind = unitKind(group);
-    const startMs = timeToMs(group[0].start);
-    const endMs = timeToMs(group[group.length - 1].end);
+    const startMs = group[0].start_ms;
+    const endMs = group[group.length - 1].end_ms;
     let chapter = openChapter[kind];
     if (!chapter || startMs - threadEnd[kind] > sceneChangeMs) {
       chapter = { kind, groups: [] };
@@ -470,18 +359,6 @@ function chapterize(groups: Segment[][], sceneChangeMs: number): RawChapter[] {
     threadEnd[kind] = endMs;
   }
   return chapters;
-}
-
-export function previewChapterCount(cues: Cue[], sceneChangeMs: number): number {
-  if (!cues.length) return 0;
-  let count = 1;
-  let threadEnd = timeToMs(cues[0].end);
-  for (let i = 1; i < cues.length; i++) {
-    const startMs = timeToMs(cues[i].start);
-    if (startMs - threadEnd > sceneChangeMs) count += 1;
-    threadEnd = Math.max(threadEnd, timeToMs(cues[i].end));
-  }
-  return count;
 }
 
 function buildUnits(cues: Cue[], glossary: Glossary, latinSource: boolean, isolatedMergeMaxWords: number, sceneChangeMs: number) {
@@ -497,7 +374,7 @@ function buildUnits(cues: Cue[], glossary: Glossary, latinSource: boolean, isola
     for (const group of memberGroups) {
       unitId += 1;
       const spans: Span[] = group.map((s) => ({
-        id: s.cue_id, start: s.start, end: s.end, text: s.text,
+        id: s.cue_id, start_ms: s.start_ms, end_ms: s.end_ms, text: s.text,
         boundary: isMusicChapter || s.marker_boundary ? "marker" : null,
         dash_index: s.dash_index || 0,
         kind: isMusicSegment(s.text) ? "music" : "dialogue",
@@ -520,23 +397,21 @@ function buildUnits(cues: Cue[], glossary: Glossary, latinSource: boolean, isola
 export const DEFAULT_SCENE_CHANGE_SECONDS = 30;
 
 export interface ExtractOptions {
-  stripSdhEnabled?: boolean;
   sourceLang?: string;
   isolatedMergeMaxWords?: number;
   sceneChangeSeconds?: number;
 }
 
-export function extract(content: string, glossary: Glossary, options: ExtractOptions = {}) {
-  const stripSdhEnabled = options.stripSdhEnabled ?? true;
+export function extract(protocolCues: ProtocolCue[], glossary: Glossary, options: ExtractOptions = {}) {
   const sourceLang = options.sourceLang ?? "en";
   const isolatedMergeMaxWords = options.isolatedMergeMaxWords ?? 0;
   const sceneChangeMs = (options.sceneChangeSeconds ?? DEFAULT_SCENE_CHANGE_SECONDS) * 1000;
   const profile = languageProfile(sourceLang);
   const latinSource = isLatinSource(sourceLang);
-  const { cues, sdhStats } = parseSrt(content, stripSdhEnabled, latinSource, profile.preserveInlineStyleTags);
+  const cues = prepareCues(protocolCues, profile.preserveInlineStyleTags);
   if (!cues.length) {
-    return { success: false, cues: [], units: [], chapters: [], sdh_removed: sdhStats, marker_merges: 0 };
+    return { success: false, cues: [], units: [], chapters: [], marker_merges: 0 };
   }
   const { units, chapters, markerMerges } = buildUnits(cues, glossary, latinSource, isolatedMergeMaxWords, sceneChangeMs);
-  return { success: true, cues, units, chapters, sdh_removed: sdhStats, marker_merges: markerMerges };
+  return { success: true, cues, units, chapters, marker_merges: markerMerges };
 }

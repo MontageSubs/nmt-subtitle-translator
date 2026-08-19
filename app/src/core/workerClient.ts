@@ -1,9 +1,10 @@
 import { WORKER_URL, TURNSTILE_SITE_KEY, FALLBACK_MAX_CHARS, REQUEST_TIMEOUT_MS, IDLE_STANDBY_MARGIN_MS, assertConfigured } from "../config";
 import { computeProbeBitmap } from "./envProbe";
+import { Cue } from "./types";
 
-const PENDING_SUCCESS_KEY = "nmt_pending_success";
 const STANDBY_TTL_MS = 60_000;
 const ACTIVE_TTL_MS = 20_000;
+const CUE_TEXT_SEPARATOR = "\u0000";
 
 export interface Stats {
   total: number;
@@ -32,18 +33,6 @@ declare global {
   interface Window {
     turnstile?: { render: (el: HTMLElement, opts: Record<string, unknown>) => string };
   }
-}
-
-function readPendingSuccess(): number {
-  return Number(localStorage.getItem(PENDING_SUCCESS_KEY) || 0) || 0;
-}
-
-export function bufferSuccess(): void {
-  localStorage.setItem(PENDING_SUCCESS_KEY, String(readPendingSuccess() + 1));
-}
-
-function clearPendingSuccess(): void {
-  localStorage.removeItem(PENDING_SUCCESS_KEY);
 }
 
 async function request(path: string, body: unknown): Promise<any> {
@@ -87,9 +76,7 @@ function adoptSession(payload: { token: string; challengeKey: string; nonce: num
 }
 
 export async function handshake(): Promise<Stats & { maxChars: number }> {
-  const pending = readPendingSuccess();
-  const payload = await request("/handshake", pending ? { pendingSuccess: pending } : {});
-  if (pending) clearPendingSuccess();
+  const payload = await request("/handshake", {});
   adoptSession(payload, STANDBY_TTL_MS);
   return { total: payload.stats?.total ?? 0, last24h: payload.stats?.last24h ?? 0, maxChars: payload.maxChars || FALLBACK_MAX_CHARS };
 }
@@ -118,6 +105,11 @@ async function signChallenge(challengeKey: string, message: string): Promise<num
 
 function computeAnswer(challengeKey: string, nonce: number, text: string, probeBitmap: number): Promise<number> {
   return signChallenge(challengeKey, `${nonce}:${probeBitmap}:${text}`);
+}
+
+/** 与 worker/src/protocol.ts 的 canonicalizeCues 逐字节一致，任一方改动需同步对方 */
+function canonicalizeCues(cues: Pick<Cue, "text">[]): string {
+  return cues.map((cue) => cue.text).join(CUE_TEXT_SEPARATOR);
 }
 
 let turnstileLoad: Promise<void> | null = null;
@@ -161,42 +153,37 @@ async function resolveTurnstile(): Promise<void> {
   }
 }
 
-async function attemptTranslate(text: string, source: string, target: string): Promise<{ translatedHtml: string; maxChars: number; detectedLang: string | null }> {
-  const active = await ensureSession();
-  session = null;
-  const probeBitmap = computeProbeBitmap();
-  const answer = await computeAnswer(active.challengeKey, active.nonce, text, probeBitmap);
-  const pending = readPendingSuccess();
-  const payload = await request("/translate", {
-    token: active.token,
-    answer,
-    probeBitmap,
-    text,
-    source,
-    target,
-    ...(pending ? { pendingSuccess: pending } : {}),
-    ...(clearance ? { clearance } : {}),
-  });
-  if (pending) clearPendingSuccess();
-  adoptSession(payload, ACTIVE_TTL_MS);
-  return { translatedHtml: payload.translatedHtml, maxChars: payload.maxChars || active.maxChars, detectedLang: payload.detectedLang ?? null };
+export interface TranslateJobPayload {
+  cues: Cue[];
+  glossary: Record<string, string>;
+  source: string;
+  target: string;
+  sceneChangeSeconds?: number;
+}
+
+export interface TranslateJobResponse {
+  success: boolean;
+  resolved_source_lang: string;
+  cues: { id: number; start_ms: number; end_ms: number; text: string; translation: string | null }[];
+  approx_splits: { unit_id: number; cues: number[]; method: string }[];
+  missing_count: number;
+  missing_cues: number[];
 }
 
 async function attemptTranslateJob(job: TranslateJobPayload): Promise<TranslateJobResponse> {
   const active = await ensureSession();
   session = null;
   const probeBitmap = computeProbeBitmap();
-  const answer = await computeAnswer(active.challengeKey, active.nonce, job.content, probeBitmap);
-  const pending = readPendingSuccess();
+  const wireCues = job.cues.map(({ id, start_ms, end_ms, text }) => ({ id, start_ms, end_ms, text }));
+  const answer = await computeAnswer(active.challengeKey, active.nonce, canonicalizeCues(wireCues), probeBitmap);
   const payload = await request("/translate-job", {
     token: active.token,
     answer,
     probeBitmap,
     ...job,
-    ...(pending ? { pendingSuccess: pending } : {}),
+    cues: wireCues,
     ...(clearance ? { clearance } : {}),
   });
-  if (pending) clearPendingSuccess();
   adoptSession(payload, ACTIVE_TTL_MS);
   return payload as TranslateJobResponse;
 }
@@ -247,48 +234,6 @@ async function withRetry<T>(attempt: () => Promise<T>): Promise<T> {
   }
 }
 
-export function postTranslateHtml(text: string, source: string, target: string): Promise<{ translatedHtml: string; maxChars: number }> {
-  return withRetry(() => attemptTranslate(text, source, target));
-}
-
-export interface TranslateJobPayload {
-  content: string;
-  glossary: Record<string, string>;
-  source: string;
-  target: string;
-  stripSdhEnabled?: boolean;
-  sceneChangeSeconds?: number;
-}
-
-export interface TranslateJobResponse {
-  success: boolean;
-  resolved_source_lang: string;
-  sdh_removed: { dropped: number; stripped: number };
-  cues: { id: number; start: string; end: string; text: string; translation: string | null }[];
-  approx_splits: { unit_id: number; cues: number[]; method: string }[];
-  missing_count: number;
-  missing_cues: number[];
-}
-
 export function postTranslateJob(job: TranslateJobPayload): Promise<TranslateJobResponse> {
   return withRetry(() => attemptTranslateJob(job));
-}
-
-const DETECT_SAMPLE_TARGET = "en";
-const DETECT_SAMPLE_MAX_CHARS = 600;
-
-/**
- * 借助 translateHtml 端点自带的 source="auto" 探测能力识别字幕语言：
- * 未经实测确认上游响应是否稳定携带检测结果——如果始终拿到 null，说明这条路径在生产环境不可用，
- * 需要改回纯手动选择语言，而不是假装探测成功。
- */
-export async function detectLanguage(sampleText: string): Promise<string | null> {
-  if (!sampleText.trim()) return null;
-  const sample = sampleText.slice(0, DETECT_SAMPLE_MAX_CHARS);
-  try {
-    const { detectedLang } = await withRetry(() => attemptTranslate(sample, "auto", DETECT_SAMPLE_TARGET));
-    return detectedLang;
-  } catch {
-    return null;
-  }
 }

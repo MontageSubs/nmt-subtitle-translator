@@ -49,8 +49,7 @@ function collectGlossaryTerms(units: Unit[]): Set<string> {
 }
 
 async function registerGlossaryTerms(terms: Set<string>, targetLang: string): Promise<void> {
-  if (!isChineseTarget(targetLang)) return;
-  for (const term of terms) await registerGlossaryTerm(term);
+  for (const term of terms) await registerGlossaryTerm(targetLang, term);
 }
 
 function enforceLineEdges(text: string): string {
@@ -139,8 +138,8 @@ function effectiveLength(text: string): number {
 const FALLBACK_BOUNDARY_PATTERN = /[，,、；;。.!?…\s]+/g;
 const WHITESPACE_TOKEN_PATTERN = /\S+\s*/g;
 
-function wordBoundaries(text: string, targetLang: string, cutFn: SyncCutter | null): number[] {
-  if (isChineseTarget(targetLang) && cutFn) {
+function wordBoundaries(text: string, cutFn: SyncCutter | null): number[] {
+  if (cutFn) {
     const boundaries = [0];
     for (const word of cutFn(text)) boundaries.push(boundaries[boundaries.length - 1] + word.length);
     return boundaries.filter((b) => b === 0 || b === text.length || (text[b - 1] !== "·" && text[b] !== "·"));
@@ -279,7 +278,7 @@ function resolveCut(
     const cut = inferred.reduce((best, c) => (Math.abs(c - expected) < Math.abs(best - expected) ? c : best));
     if (Math.abs(cut - expected) <= Math.max(INFERRED_PUNCT_TOLERANCE * chunk, PUNCT_PROXIMITY_CHARS)) return [cut, "inferred"];
   }
-  const boundaries = wordBoundaries(text.slice(cursor), targetLang, cutFn)
+  const boundaries = wordBoundaries(text.slice(cursor), cutFn)
     .map((b) => b + cursor)
     .filter((b) => cursor < b && b < ceiling && !insideProtectedSpan(b, protectedSpans));
   if (boundaries.length) return [nearestBoundary(boundaries, expected), null];
@@ -500,7 +499,7 @@ async function buildBilingualCues(
   const dashStyle = determineDashStyle(cues);
   const cueTextById = new Map(cues.map((c) => [c.id, c.text]));
 
-  if (isChineseTarget(targetLang)) await registerGlossaryTerms(glossaryTerms, targetLang);
+  await registerGlossaryTerms(glossaryTerms, targetLang);
 
   const push = (cueId: number, entry: [number, string | null]) => {
     if (!cueSegments.has(cueId)) cueSegments.set(cueId, []);
@@ -543,7 +542,7 @@ async function buildBilingualCues(
       translation = translation.replace(DASH_REPLACE_PATTERN, `$1${dashStyle}`);
       translation = normalizeExclaimQuestion(translation);
       if (sourceIsMusic(cue.text)) {
-        translation = POSITION_TOP_TAG + formatMusicLine(translation);
+        translation = isChineseTarget(targetLang) ? POSITION_TOP_TAG + formatMusicLine(translation) : formatMusicLine(translation);
       } else {
         translation = restoreQuoteMarkers(translation, targetLang);
       }
@@ -563,7 +562,7 @@ export interface MergeResult {
 export async function merge(
   cues: Cue[], units: Unit[], translations: Record<string, string>, sourceLang: string, targetLang: string
 ): Promise<MergeResult> {
-  const cutFn = isChineseTarget(targetLang) ? await getSyncCutter() : null;
+  const cutFn = await getSyncCutter(targetLang);
   const { cues: mergedCues, approxSplits } = await buildBilingualCues(cues, units, translations, targetLang, sourceLang, cutFn);
 
   const positionOfCue = new Map(mergedCues.map((cue, i) => [cue.id, i + 1]));

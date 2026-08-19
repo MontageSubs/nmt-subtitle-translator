@@ -9,32 +9,36 @@ import { consumeNonceOnce } from "../nonce";
 import { hashIp, clientIp } from "../identity";
 import { json, parseBody, logGate, reportError } from "../response";
 import { gateForRequest, consumeBurst, escalateOnBurstTrip, consumeRateLimit } from "../gate";
-import { reportPending } from "../stats";
+import { recordTranslatedUnits } from "../stats";
 import { runTranslateJob } from "../core/pipeline";
 import { Glossary } from "../core/srtExtract";
+import { ProtocolCue, canonicalizeCues, isValidProtocolCue } from "../protocol";
 
 interface TranslateJobRequestBody {
   token?: string;
   answer?: number;
-  content?: string;
+  cues?: ProtocolCue[];
   glossary?: Glossary;
   source?: string;
   target?: string;
-  stripSdhEnabled?: boolean;
   sceneChangeSeconds?: number;
-  pendingSuccess?: number;
   clearance?: string;
   probeBitmap?: number;
 }
 
 const MAX_GLOSSARY_ENTRIES = 500;
 const MAX_GLOSSARY_ENTRY_CHARS = 200;
+const MAX_CUES_PER_REQUEST = 20_000;
 
 function isValidGlossary(value: unknown): value is Glossary {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const entries = Object.entries(value as Record<string, unknown>);
   if (entries.length > MAX_GLOSSARY_ENTRIES) return false;
   return entries.every(([k, v]) => typeof k === "string" && typeof v === "string" && k.length <= MAX_GLOSSARY_ENTRY_CHARS && v.length <= MAX_GLOSSARY_ENTRY_CHARS);
+}
+
+function isValidCues(value: unknown): value is ProtocolCue[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= MAX_CUES_PER_REQUEST && value.every(isValidProtocolCue);
 }
 
 export async function handleTranslateJob(request: Request, env: Env, ctx: ExecutionContext, origin: string): Promise<Response> {
@@ -69,20 +73,22 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
     return json({ error: "token already used" }, 401, origin, env);
   }
 
-  const { content, source, target, stripSdhEnabled, sceneChangeSeconds } = body;
+  const { source, target, sceneChangeSeconds } = body;
   const glossary = isValidGlossary(body.glossary) ? body.glossary : {};
-  if (!content || !source || !target) {
+  if (!isValidCues(body.cues) || !source || !target) {
     return json({ error: "invalid translate-job request" }, 400, origin, env);
   }
+  const cues = body.cues;
 
   const contentLimit = maxContentChars(env);
-  if (content.length > contentLimit) {
+  const totalChars = cues.reduce((sum, cue) => sum + cue.text.length, 0);
+  if (totalChars > contentLimit) {
     return json({ error: "payload exceeds maxContentChars", maxContentChars: contentLimit }, 413, origin, env);
   }
 
   const probeBitmap = Number(body.probeBitmap);
   const keyBytes = await deriveChallengeKey(matchedSecret, payload.nonce);
-  const expected = await computeAnswer(keyBytes, payload.nonce, content, probeBitmap);
+  const expected = await computeAnswer(keyBytes, payload.nonce, canonicalizeCues(cues), probeBitmap);
   if (expected !== body.answer) {
     logGate("challenge_mismatch", ipHash);
     return json({ error: "challenge mismatch" }, 403, origin, env);
@@ -104,7 +110,7 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
   }
 
   try {
-    const success = await consumeRateLimit(env, ipHash, content.length, gate.degraded, cleared);
+    const success = await consumeRateLimit(env, ipHash, totalChars, gate.degraded, cleared);
     if (!success) {
       logGate("rate_limited", ipHash, { cleared });
       return json({ error: "rate_limited", trigger_turnstile: !cleared }, 429, origin, env);
@@ -115,13 +121,13 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
 
   let job: Awaited<ReturnType<typeof runTranslateJob>>;
   try {
-    job = await runTranslateJob(env, { content, glossary, source, target, stripSdhEnabled, sceneChangeSeconds }, maxBatchChars(env), startedAt);
+    job = await runTranslateJob(env, { cues, glossary, source, target, sceneChangeSeconds }, maxBatchChars(env), startedAt);
   } catch (e) {
     reportError("translate job failed", e);
     return json({ error: "translate job failed" }, 502, origin, env);
   }
 
-  reportPending(ctx, env, body.pendingSuccess);
+  recordTranslatedUnits(ctx, env, job.cues.length - job.missing_count);
   const { token, challengeKey, nonce } = await issueSession(ring, ACTIVE_TTL_MS);
   return json({ ...job, token, challengeKey, nonce }, 200, origin, env);
 }

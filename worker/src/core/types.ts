@@ -1,7 +1,7 @@
 export interface Cue {
   id: number;
-  start: string;
-  end: string;
+  start_ms: number;
+  end_ms: number;
   text: string;
 }
 
@@ -9,8 +9,8 @@ export type BoundaryTag = "marker" | "dash" | "gap" | "music" | null;
 
 export interface Span {
   id: number;
-  start: string;
-  end: string;
+  start_ms: number;
+  end_ms: number;
   text: string;
   boundary: BoundaryTag;
   dash_index: number;
@@ -44,7 +44,6 @@ export interface ExtractResult {
   cues: Cue[];
   units: Unit[];
   chapters: Chapter[];
-  sdh_removed: { dropped: number; stripped: number };
   marker_merges: number;
 }
 
