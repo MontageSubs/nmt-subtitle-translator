@@ -7,5 +7,6 @@ export interface Cue {
 }
 
 export type OutputMode = "bilingual" | "monolingual";
+export type BilingualStacking = "translation_top" | "original_top";
 
 export type Glossary = Record<string, string>;

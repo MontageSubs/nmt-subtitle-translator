@@ -20,7 +20,7 @@ export interface TranslateJobResult extends MergeResult {
 export async function runTranslateJob(
   env: Env, job: TranslateJobRequest, maxChars: number, startedAt: number, onLog?: (message: string) => void
 ): Promise<TranslateJobResult> {
-  const extracted = extract(job.cues, job.glossary, { sourceLang: job.source, sceneChangeSeconds: job.sceneChangeSeconds });
+  const extracted = extract(job.cues, job.glossary, { sourceLang: job.source, targetLang: job.target, sceneChangeSeconds: job.sceneChangeSeconds });
   if (!extracted.success) {
     return { success: false, resolved_source_lang: job.source, cues: [], approx_splits: [], missing_count: 0, missing_cues: [] };
   }

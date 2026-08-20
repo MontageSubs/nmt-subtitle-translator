@@ -6,7 +6,6 @@ export interface LanguageProfile {
   writingSystem: WritingSystem;
   usesLatinPunctuation: boolean;
   stripsCjkTerminalPunctuation: boolean;
-  preserveInlineStyleTags: boolean;
   enableSpeakerTagStrip: boolean;
   enableStutterResolution: boolean;
   enableDashDialogueSplit: boolean;
@@ -17,7 +16,6 @@ interface ProfileOverrides {
   writingSystem?: WritingSystem;
   usesLatinPunctuation?: boolean;
   stripsCjkTerminalPunctuation?: boolean;
-  preserveInlineStyleTags?: boolean;
   enableSpeakerTagStrip?: boolean;
   enableStutterResolution?: boolean;
   enableDashDialogueSplit?: boolean;
@@ -30,7 +28,6 @@ function profile(code: string, writingSystem: WritingSystem, overrides: ProfileO
     script: overrides.script ?? (writingSystem === "cjk" ? "cjk" : writingSystem === "latin" ? "latin" : "other"),
     usesLatinPunctuation: overrides.usesLatinPunctuation ?? isLatin,
     stripsCjkTerminalPunctuation: overrides.stripsCjkTerminalPunctuation ?? false,
-    preserveInlineStyleTags: overrides.preserveInlineStyleTags ?? isLatin,
     enableSpeakerTagStrip: overrides.enableSpeakerTagStrip ?? isLatin,
     enableStutterResolution: overrides.enableStutterResolution ?? isLatin,
     enableDashDialogueSplit: overrides.enableDashDialogueSplit ?? true,

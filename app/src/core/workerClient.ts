@@ -213,6 +213,7 @@ export interface TranslateJobPayload {
   source: string;
   target: string;
   sceneChangeSeconds?: number;
+  retryToken?: string;
 }
 
 export interface TranslateJobResponse {
@@ -222,6 +223,7 @@ export interface TranslateJobResponse {
   approx_splits: { unit_id: number; cues: number[]; method: string }[];
   missing_count: number;
   missing_cues: number[];
+  retry_token?: string;
 }
 
 async function attemptTranslateJob(job: TranslateJobPayload, onLog?: (message: string) => void): Promise<TranslateJobResponse> {
@@ -290,4 +292,19 @@ async function withRetry<T>(attempt: () => Promise<T>): Promise<T> {
 
 export function postTranslateJob(job: TranslateJobPayload, onLog?: (message: string) => void): Promise<TranslateJobResponse> {
   return withRetry(() => attemptTranslateJob(job, onLog));
+}
+
+const MAX_AUTO_RETRY_ROUNDS = 2;
+
+export async function completeTranslateJob(job: TranslateJobPayload, onLog?: (message: string) => void): Promise<TranslateJobResponse> {
+  let result = await postTranslateJob(job, onLog);
+  for (let round = 0; result.success && result.missing_count > 0 && result.retry_token && round < MAX_AUTO_RETRY_ROUNDS; round++) {
+    const missingIds = new Set(result.missing_cues);
+    const outstandingCues = job.cues.filter((cue) => missingIds.has(cue.id));
+    if (!outstandingCues.length) break;
+    const retryResult = await postTranslateJob({ ...job, cues: outstandingCues, retryToken: result.retry_token }, onLog);
+    const translatedById = new Map(retryResult.cues.map((cue) => [cue.id, cue]));
+    result = { ...retryResult, cues: result.cues.map((cue) => translatedById.get(cue.id) ?? cue) };
+  }
+  return result;
 }

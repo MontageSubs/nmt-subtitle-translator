@@ -1,4 +1,4 @@
-import { Cue, OutputMode } from "./types";
+import { Cue, OutputMode, BilingualStacking } from "./types";
 import { TranslateJobResponse } from "./workerClient";
 
 export function msToSrtTime(ms: number): string {
@@ -11,11 +11,14 @@ export function msToSrtTime(ms: number): string {
   return `${pad(hh, 2)}:${pad(mm, 2)}:${pad(ss, 2)},${pad(msRemainder, 3)}`;
 }
 
-export function renderSrt(cues: TranslateJobResponse["cues"], originalById: Map<number, Cue>, mode: OutputMode): string {
+export function renderSrt(
+  cues: TranslateJobResponse["cues"], originalById: Map<number, Cue>, mode: OutputMode, stacking: BilingualStacking = "translation_top"
+): string {
   const blocks = cues.map((cue, i) => {
     const position = originalById.get(cue.id)?.position ?? "";
     const translation = cue.translation || "";
-    const lines = mode === "bilingual" ? (translation ? [translation, cue.text] : [cue.text]) : [translation || cue.text];
+    const bilingualLines = stacking === "original_top" ? [cue.text, translation] : [translation, cue.text];
+    const lines = mode === "bilingual" ? (translation ? bilingualLines : [cue.text]) : [translation || cue.text];
     return `${i + 1}\n${msToSrtTime(cue.start_ms)} --> ${msToSrtTime(cue.end_ms)}\n${position}${lines.join("\n")}`;
   });
   return blocks.join("\n\n") + "\n";

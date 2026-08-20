@@ -13,6 +13,9 @@ import { recordCompletedJob } from "../stats";
 import { runTranslateJob } from "../core/pipeline";
 import { Glossary } from "../core/srtExtract";
 import { ProtocolCue, canonicalizeCues, isValidProtocolCue } from "../protocol";
+import { sha256Hex } from "../crypto";
+import { issueRetryToken, verifyRetryToken, canonicalCueContent, RETRY_TOKEN_GUARD_TTL_MS } from "../retryToken";
+import { consumeRetryTokenOnce } from "../retryTokenGuard";
 
 interface TranslateJobRequestBody {
   token?: string;
@@ -24,12 +27,12 @@ interface TranslateJobRequestBody {
   sceneChangeSeconds?: number;
   clearance?: string;
   probeBitmap?: number;
+  retryToken?: string;
 }
 
 const MAX_GLOSSARY_ENTRIES = 500;
 const MAX_GLOSSARY_ENTRY_CHARS = 200;
 const MAX_CUES_PER_REQUEST = 20_000;
-const JOB_SUCCESS_THRESHOLD = 0.95;
 
 function isValidGlossary(value: unknown): value is Glossary {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -81,6 +84,17 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
   }
   const cues = body.cues;
 
+  let correlationId = crypto.randomUUID();
+  if (body.retryToken) {
+    const payload = await verifyRetryToken(ring, body.retryToken);
+    if (payload) {
+      const contentHash = await sha256Hex(canonicalCueContent(cues));
+      if (payload.content_hash === contentHash && await consumeRetryTokenOnce(env.DB, payload.correlation_id, now, RETRY_TOKEN_GUARD_TTL_MS)) {
+        correlationId = payload.correlation_id;
+      }
+    }
+  }
+
   const contentLimit = maxContentChars(env);
   const totalChars = cues.reduce((sum, cue) => sum + cue.text.length, 0);
   if (totalChars > contentLimit) {
@@ -130,9 +144,17 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
       return;
     }
 
-    const completionRatio = job.cues.length ? (job.cues.length - job.missing_count) / job.cues.length : 0;
-    if (job.success && completionRatio >= JOB_SUCCESS_THRESHOLD) recordCompletedJob(ctx, env);
+    let retryToken: string | undefined;
+    if (job.success && job.missing_count > 0) {
+      const missingIds = new Set(job.missing_cues);
+      const outstandingCues = cues.filter((cue) => missingIds.has(cue.id));
+      const contentHash = await sha256Hex(canonicalCueContent(outstandingCues));
+      retryToken = await issueRetryToken(ring, { correlationId, contentHash, outstandingIds: job.missing_cues });
+    } else if (job.success) {
+      recordCompletedJob(ctx, env);
+    }
+
     const { token, challengeKey, nonce } = await issueSession(ring, ACTIVE_TTL_MS);
-    await emit({ type: "result", ...job, token, challengeKey, nonce });
+    await emit({ type: "result", ...job, retry_token: retryToken, token, challengeKey, nonce });
   });
 }

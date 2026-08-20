@@ -398,6 +398,7 @@ export const DEFAULT_SCENE_CHANGE_SECONDS = 30;
 
 export interface ExtractOptions {
   sourceLang?: string;
+  targetLang?: string;
   isolatedMergeMaxWords?: number;
   sceneChangeSeconds?: number;
 }
@@ -406,9 +407,9 @@ export function extract(protocolCues: ProtocolCue[], glossary: Glossary, options
   const sourceLang = options.sourceLang ?? "en";
   const isolatedMergeMaxWords = options.isolatedMergeMaxWords ?? 0;
   const sceneChangeMs = (options.sceneChangeSeconds ?? DEFAULT_SCENE_CHANGE_SECONDS) * 1000;
-  const profile = languageProfile(sourceLang);
   const latinSource = isLatinSource(sourceLang);
-  const cues = prepareCues(protocolCues, profile.preserveInlineStyleTags);
+  const preserveInlineStyleTags = languageProfile(options.targetLang).script !== "cjk";
+  const cues = prepareCues(protocolCues, preserveInlineStyleTags);
   if (!cues.length) {
     return { success: false, cues: [], units: [], chapters: [], marker_merges: 0 };
   }

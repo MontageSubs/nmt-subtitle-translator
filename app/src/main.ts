@@ -2,8 +2,8 @@ import "./style.css";
 import { DEFAULT_SCENE_CHANGE_SECONDS, previewChapterCount, parseSrt } from "./core/srtParse";
 import { renderSrt, msToSrtTime } from "./core/srtRender";
 import { SOURCE_LANGUAGES, TARGET_LANGUAGES, AUTO_DETECT_CODE, defaultOutputMode, languageProfile } from "./core/languageProfiles";
-import { Cue, OutputMode } from "./core/types";
-import { handshake, postTranslateJob, TranslateJobResponse } from "./core/workerClient";
+import { Cue, OutputMode, BilingualStacking } from "./core/types";
+import { handshake, completeTranslateJob, TranslateJobResponse } from "./core/workerClient";
 import { applySdhStripping } from "./core/sdh";
 import { detectSourceLanguage, isKnownSourceLanguage } from "./core/detect";
 import { loadBundledDictionary, entriesToGlossary, DictionaryEntry } from "./core/dictionary";
@@ -25,9 +25,11 @@ interface AppState {
   lastCues: Cue[];
   lastJobResult: TranslateJobResponse | null;
   lastRenderMode: OutputMode;
+  lastStacking: BilingualStacking;
   sourceLang: string;
   targetLang: string;
   outputMode: OutputMode;
+  stackingOrder: BilingualStacking;
   userPickedOutputMode: boolean;
   sdhEnabled: boolean;
   sceneSeconds: number;
@@ -39,9 +41,11 @@ const state: AppState = {
   lastCues: [],
   lastJobResult: null,
   lastRenderMode: "monolingual",
+  lastStacking: "translation_top",
   sourceLang: AUTO_DETECT_CODE,
   targetLang: "zh",
   outputMode: "monolingual",
+  stackingOrder: "translation_top",
   userPickedOutputMode: false,
   sdhEnabled: true,
   sceneSeconds: DEFAULT_SCENE_CHANGE_SECONDS,
@@ -95,6 +99,13 @@ function renderApp() {
           <select id="output-mode">
             <option value="bilingual">${t("outputMode.bilingual")}</option>
             <option value="monolingual">${t("outputMode.monolingual")}</option>
+          </select>
+        </label>
+        <label class="field" id="stacking-field" ${state.targetLang === "zh" && state.outputMode === "bilingual" ? "" : "hidden"}>
+          <span>${t("field.stacking")}</span>
+          <select id="stacking-order">
+            <option value="translation_top">${t("stacking.translationTop")}</option>
+            <option value="original_top">${t("stacking.originalTop")}</option>
           </select>
         </label>
         <div id="glossary-editor"></div>
@@ -174,6 +185,8 @@ function wireApp() {
   const detectHint = document.getElementById("detect-hint") as HTMLElement;
   const outputModeField = document.getElementById("output-mode-field") as HTMLElement;
   const outputModeSelect = document.getElementById("output-mode") as HTMLSelectElement;
+  const stackingField = document.getElementById("stacking-field") as HTMLElement;
+  const stackingSelect = document.getElementById("stacking-order") as HTMLSelectElement;
   const sdhToggle = document.getElementById("sdh-toggle") as HTMLInputElement;
   const sceneSecondsInput = document.getElementById("scene-seconds") as HTMLInputElement;
   const sceneSecondsNumber = document.getElementById("scene-seconds-number") as HTMLInputElement;
@@ -194,6 +207,7 @@ function wireApp() {
   fillSelect(sourceSelect, SOURCE_LANGUAGES, state.sourceLang, true);
   fillSelect(targetSelect, TARGET_LANGUAGES, state.targetLang);
   outputModeSelect.value = state.outputMode;
+  stackingSelect.value = state.stackingOrder;
   if (state.srtFile) dropzoneFile.textContent = t("dropzone.selected", { name: state.srtFile.name });
 
   const glossaryHandle = mountGlossaryEditor(glossaryEditorContainer, state.glossaryEntries);
@@ -212,11 +226,16 @@ function wireApp() {
       state.outputMode = defaultOutputMode(sourceSelect.value === AUTO_DETECT_CODE ? "en" : sourceSelect.value, targetSelect.value);
       outputModeSelect.value = state.outputMode;
     }
+    stackingField.hidden = !isZhTarget || state.outputMode !== "bilingual";
   }
 
   outputModeSelect.addEventListener("change", () => {
     state.userPickedOutputMode = true;
     state.outputMode = outputModeSelect.value as OutputMode;
+    stackingField.hidden = targetSelect.value !== "zh" || state.outputMode !== "bilingual";
+  });
+  stackingSelect.addEventListener("change", () => {
+    state.stackingOrder = stackingSelect.value as BilingualStacking;
   });
   targetSelect.addEventListener("change", () => { state.targetLang = targetSelect.value; updateOutputModeVisibility(); });
   sourceSelect.addEventListener("change", () => {
@@ -318,10 +337,11 @@ function wireApp() {
       const glossary = entriesToGlossary(state.glossaryEntries);
 
       const { cues: wireCues } = applySdhStripping(state.lastCues, sourceLang, stripSdhEnabled);
-      const job = await postTranslateJob({ cues: wireCues, glossary, source: sourceLang, target: targetLang, sceneChangeSeconds }, appendLog);
+      const job = await completeTranslateJob({ cues: wireCues, glossary, source: sourceLang, target: targetLang, sceneChangeSeconds }, appendLog);
       if (!job.success) throw new Error(t("error.parseFailed"));
       state.lastJobResult = job;
       state.lastRenderMode = outputMode;
+      state.lastStacking = state.stackingOrder;
 
       if (sourceLang === AUTO_DETECT_CODE) {
         const known = SOURCE_LANGUAGES.some((l) => l.code === job.resolved_source_lang.split("-")[0]);
@@ -334,7 +354,7 @@ function wireApp() {
       progressBar.value = 100;
       progressLabel.textContent = t("progress.merging");
       const originalById = new Map(state.lastCues.map((c) => [c.id, c]));
-      const srt = renderSrt(job.cues, originalById, outputMode);
+      const srt = renderSrt(job.cues, originalById, outputMode, state.stackingOrder);
 
       const blob = new Blob([srt], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
@@ -360,7 +380,7 @@ function wireApp() {
       id: c.id, start: msToSrtTime(c.start_ms), end: msToSrtTime(c.end_ms), source: c.text, target: c.translation || t("preview.missing"),
     }));
     const originalById = new Map(state.lastCues.map((c) => [c.id, c]));
-    openPreviewModal(renderSrt(state.lastJobResult.cues, originalById, state.lastRenderMode), cards);
+    openPreviewModal(renderSrt(state.lastJobResult.cues, originalById, state.lastRenderMode, state.lastStacking), cards);
   });
 }
 
