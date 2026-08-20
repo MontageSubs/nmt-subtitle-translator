@@ -29,7 +29,6 @@ export interface Unit {
   spans: Span[];
   text: string;
   term_matches: TermMatch[];
-  embed_ratio: number;
   resolved: string | null;
 }
 

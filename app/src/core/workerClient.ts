@@ -1,4 +1,4 @@
-import { WORKER_URL, TURNSTILE_SITE_KEY, FALLBACK_MAX_CHARS, REQUEST_TIMEOUT_MS, IDLE_STANDBY_MARGIN_MS, assertConfigured } from "../config";
+import { WORKER_URL, TURNSTILE_SITE_KEY, REQUEST_TIMEOUT_MS, IDLE_STANDBY_MARGIN_MS, assertConfigured } from "../config";
 import { computeProbeBitmap } from "./envProbe";
 import { Cue } from "./types";
 
@@ -15,7 +15,6 @@ interface Session {
   token: string;
   challengeKey: string;
   nonce: number;
-  maxChars: number;
   issuedAt: number;
   ttl: number;
 }
@@ -118,30 +117,19 @@ function isSessionFresh(candidate: Session | null): boolean {
   return Date.now() - candidate.issuedAt < candidate.ttl - IDLE_STANDBY_MARGIN_MS;
 }
 
-function adoptSession(payload: { token: string; challengeKey: string; nonce: number; maxChars?: number }, ttl: number): void {
-  session = {
-    token: payload.token,
-    challengeKey: payload.challengeKey,
-    nonce: payload.nonce,
-    maxChars: payload.maxChars || session?.maxChars || FALLBACK_MAX_CHARS,
-    issuedAt: Date.now(),
-    ttl,
-  };
+function adoptSession(payload: { token: string; challengeKey: string; nonce: number }, ttl: number): void {
+  session = { token: payload.token, challengeKey: payload.challengeKey, nonce: payload.nonce, issuedAt: Date.now(), ttl };
 }
 
-export async function handshake(): Promise<Stats & { maxChars: number }> {
+export async function handshake(): Promise<Stats> {
   const payload = await request("/handshake", {});
   adoptSession(payload, STANDBY_TTL_MS);
-  return { total: payload.stats?.total ?? 0, last24h: payload.stats?.last24h ?? 0, maxChars: payload.maxChars || FALLBACK_MAX_CHARS };
+  return { total: payload.stats?.total ?? 0, last24h: payload.stats?.last24h ?? 0 };
 }
 
 async function ensureSession(): Promise<Session> {
   if (!isSessionFresh(session)) await handshake();
   return session!;
-}
-
-export function getMaxChars(): number {
-  return session?.maxChars || FALLBACK_MAX_CHARS;
 }
 
 function decodeBase64Url(value: string): Uint8Array {
@@ -213,6 +201,8 @@ export interface TranslateJobPayload {
   source: string;
   target: string;
   sceneChangeSeconds?: number;
+  caseSensitiveTerms?: boolean;
+  contextText?: string;
   retryToken?: string;
 }
 
@@ -302,7 +292,7 @@ export async function completeTranslateJob(job: TranslateJobPayload, onLog?: (me
     const missingIds = new Set(result.missing_cues);
     const outstandingCues = job.cues.filter((cue) => missingIds.has(cue.id));
     if (!outstandingCues.length) break;
-    const retryResult = await postTranslateJob({ ...job, cues: outstandingCues, retryToken: result.retry_token }, onLog);
+    const retryResult = await postTranslateJob({ ...job, cues: outstandingCues, retryToken: result.retry_token, contextText: undefined }, onLog);
     const translatedById = new Map(retryResult.cues.map((cue) => [cue.id, cue]));
     result = { ...retryResult, cues: result.cues.map((cue) => translatedById.get(cue.id) ?? cue) };
   }

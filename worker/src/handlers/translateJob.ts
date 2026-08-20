@@ -25,6 +25,8 @@ interface TranslateJobRequestBody {
   source?: string;
   target?: string;
   sceneChangeSeconds?: number;
+  caseSensitiveTerms?: boolean;
+  contextText?: string;
   clearance?: string;
   probeBitmap?: number;
   retryToken?: string;
@@ -33,6 +35,7 @@ interface TranslateJobRequestBody {
 const MAX_GLOSSARY_ENTRIES = 500;
 const MAX_GLOSSARY_ENTRY_CHARS = 200;
 const MAX_CUES_PER_REQUEST = 20_000;
+const MAX_CONTEXT_CHARS = 500;
 
 function isValidGlossary(value: unknown): value is Glossary {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -77,7 +80,7 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
     return json({ error: "token already used" }, 401, origin, env);
   }
 
-  const { source, target, sceneChangeSeconds } = body;
+  const { source, target, sceneChangeSeconds, caseSensitiveTerms } = body;
   const glossary = isValidGlossary(body.glossary) ? body.glossary : {};
   if (!isValidCues(body.cues) || !source || !target) {
     return json({ error: "invalid translate-job request" }, 400, origin, env);
@@ -85,15 +88,21 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
   const cues = body.cues;
 
   let correlationId = crypto.randomUUID();
+  let isRetryContinuation = false;
   if (body.retryToken) {
     const payload = await verifyRetryToken(ring, body.retryToken);
     if (payload) {
       const contentHash = await sha256Hex(canonicalCueContent(cues));
       if (payload.content_hash === contentHash && await consumeRetryTokenOnce(env.DB, payload.correlation_id, now, RETRY_TOKEN_GUARD_TTL_MS)) {
         correlationId = payload.correlation_id;
+        isRetryContinuation = true;
       }
     }
   }
+
+  const contextText = !isRetryContinuation && typeof body.contextText === "string"
+    ? body.contextText.trim().slice(0, MAX_CONTEXT_CHARS)
+    : undefined;
 
   const contentLimit = maxContentChars(env);
   const totalChars = cues.reduce((sum, cue) => sum + cue.text.length, 0);
@@ -137,7 +146,7 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
   return ndjsonStream(ctx, origin, env, async (emit) => {
     let job: Awaited<ReturnType<typeof runTranslateJob>>;
     try {
-      job = await runTranslateJob(env, { cues, glossary, source, target, sceneChangeSeconds }, maxBatchChars(env), startedAt, (message) => emit({ type: "log", message }));
+      job = await runTranslateJob(env, { cues, glossary, source, target, sceneChangeSeconds, caseSensitiveTerms, contextText }, maxBatchChars(env), startedAt, (message) => emit({ type: "log", message }));
     } catch (e) {
       reportError("translate job failed", e);
       await emit({ type: "error", message: "translate job failed" });

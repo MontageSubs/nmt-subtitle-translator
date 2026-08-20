@@ -14,18 +14,10 @@ const TAG_PATTERN = /<[^>]+>/g;
 const ITALIC_PATTERN = /<i>.*?<\/i>/gs;
 const CONTENT_CHAR_PATTERN = /[\p{L}\p{N}_]/u;
 
-const EMBED_RATIO_THRESHOLD = 0.3;
-const TERM_PLACEHOLDER_TEMPLATE = (idx: number) => `\u27e6T${String(idx).padStart(2, "0")}\u27e7`;
-const VARIANT_PRIORITY = ["bracketed", "embedded", "placeholder", "plain"] as const;
-
-// 拉丁语系目标语言下，术语表的目标译词有时与源文拼写恰好雷同/相近，直接嵌入原文（embedded 变体）
-// 可能被 Google 误判为拼写错误而"纠正"掉。这里改为把原词原样括起来发送，回收时校验括号数量是否
-// 与发送前一致——一致则说明位置未被打乱，安全地替换成术语表译词；数量对不上则放弃，交给同批并发
-// 请求的 placeholder 变体兜底。方括号选用生僻的 QUILL 变体，正常字幕文本内容不会自然出现。
-const BRACKET_OPEN = "\u2045";
-const BRACKET_CLOSE = "\u2046";
-const BRACKETED_TERM_PATTERN = /\u2045([^\u2045\u2046]*)\u2046/g;
 const STYLE_TAG_PATTERN = /<\/?(i|b|u)>/gi;
+const NO_TRANSLATE_OPEN = "\u2045";
+const NO_TRANSLATE_CLOSE = "\u2046";
+const NO_TRANSLATE_SENTINEL_PATTERN = /\u2045([\s\S]*?)\u2046/g;
 
 const BATCH_PACK_RATIO = 0.9;
 const INDEX_DIGITS_ESTIMATE = 4;
@@ -155,14 +147,15 @@ function buildBatches(items: Item[], chapterGroups: string[][], batchChars: numb
   return { batches, oversized };
 }
 
-function buildChapterHtml(group: Item[], indices: Map<string, number>): string {
+function buildChapterHtml(group: Item[], indices: Map<string, number>, contextText?: string): string {
   const spans = group
     .map((item) => {
       const idx = indices.get(item.id)!;
       return `<span id=${idx}>${groupMarker(idx)}${escapeHtml(item.text)}</span>`;
     })
     .join("");
-  return `<div>${spans}</div>`;
+  const context = contextText ? `<span>${groupMarker("ctx")}${escapeHtml(contextText)}</span>` : "";
+  return `<div>${context}${spans}</div>`;
 }
 
 function parseByMarkers(html: string): Map<number, string> {
@@ -181,11 +174,11 @@ async function sendHtml(env: Env, html: string, sourceLang: string, targetLang: 
   return upstream.translatedHtml;
 }
 
-function prepareBatch(batch: Item[][]): { items: Item[]; idByIndex: Map<number, string>; html: string } {
+function prepareBatch(batch: Item[][], contextText?: string): { items: Item[]; idByIndex: Map<number, string>; html: string } {
   const items = batch.flat();
   const indices = new Map(items.map((item, i) => [item.id, i + 1]));
   const idByIndex = new Map(Array.from(indices, ([id, i]) => [i, id]));
-  const html = batch.map((group) => buildChapterHtml(group, indices)).join("");
+  const html = batch.map((group) => buildChapterHtml(group, indices, contextText)).join("");
   return { items, idByIndex, html };
 }
 
@@ -202,11 +195,11 @@ function extractTranslations(translatedHtml: string, items: Item[], idByIndex: M
 }
 
 async function sendBatches(
-  env: Env, batches: Item[][][], sourceLang: string, targetLang: string, budgetMs: number, resolver?: LangResolver
+  env: Env, batches: Item[][][], sourceLang: string, targetLang: string, budgetMs: number, resolver?: LangResolver, contextText?: string
 ): Promise<Map<string, string>> {
   if (!batches.length) return new Map();
-  const prepared = batches.map(prepareBatch);
-  const results = await fanOutTranslations(env, prepared.map((p) => p.html), sourceLang, targetLang, budgetMs, resolver);
+  const prepared = batches.map((batch) => prepareBatch(batch, contextText));
+  const results = await fanOutTranslations(env, prepared.map((p) => activateNoTranslateSpans(p.html)), sourceLang, targetLang, budgetMs, resolver);
 
   const translations = new Map<string, string>();
   prepared.forEach(({ items, idByIndex }, i) => {
@@ -225,12 +218,12 @@ function cueRef(itemId: string): string {
 }
 
 async function translate(
-  env: Env, items: Item[], chapterGroups: string[][], sourceLang: string, targetLang: string, maxChars: number, startedAt: number, resolver: LangResolver
+  env: Env, items: Item[], chapterGroups: string[][], sourceLang: string, targetLang: string, maxChars: number, startedAt: number, resolver: LangResolver, contextText?: string
 ): Promise<{ translations: Map<string, string>; skipped: string[] }> {
   const { batches, oversized } = buildBatches(items, chapterGroups, maxChars);
   for (const item of oversized) log(`unit ${item.id}: ${item.text.length} chars exceeds maxChars (${maxChars}), cue-level content cannot be split further, skipping without truncation`);
 
-  const translations = await sendBatches(env, batches, sourceLang, targetLang, remainingBudgetMs(startedAt), resolver);
+  const translations = await sendBatches(env, batches, sourceLang, targetLang, remainingBudgetMs(startedAt), resolver, contextText);
 
   const oversizedIds = new Set(oversized.map((i) => i.id));
   let missing = items.map((i) => i.id).filter((id) => !translations.has(id) && !oversizedIds.has(id));
@@ -269,55 +262,67 @@ interface TermMatch {
   target: string;
 }
 
-interface VariantPayload {
-  sourceText: string;
-  mapping: Record<string, string>;
-  bracketOrder?: string[];
+interface TermGroup {
+  start: number;
+  end: number;
+  literal: string;
+  replacement: string;
 }
 
-function applyTermMatches(text: string, termMatches: TermMatch[], variant: "embedded" | "placeholder"): [string, Record<string, string>] {
-  const pieces: string[] = [];
-  const mapping: Record<string, string> = {};
-  let cursor = 0;
-  termMatches.forEach((match, idx) => {
-    pieces.push(text.slice(cursor, match.start));
-    if (variant === "embedded") {
-      pieces.push(match.target);
-    } else {
-      const placeholder = TERM_PLACEHOLDER_TEMPLATE(idx);
-      mapping[placeholder] = match.target;
-      pieces.push(placeholder);
+function buildTermGroups(text: string, termMatches: TermMatch[]): TermGroup[] {
+  const groups: TermGroup[] = [];
+  let i = 0;
+  while (i < termMatches.length) {
+    let j = i;
+    let groupEnd = termMatches[i].end;
+    while (j + 1 < termMatches.length && /^\s*$/.test(text.slice(groupEnd, termMatches[j + 1].start))) {
+      j += 1;
+      groupEnd = termMatches[j].end;
     }
-    cursor = match.end;
-  });
-  pieces.push(text.slice(cursor));
-  return [pieces.join(""), mapping];
+    const groupStart = termMatches[i].start;
+    let replacement = "";
+    let cursor = groupStart;
+    for (let k = i; k <= j; k++) {
+      replacement += text.slice(cursor, termMatches[k].start) + termMatches[k].target;
+      cursor = termMatches[k].end;
+    }
+    replacement += text.slice(cursor, groupEnd);
+    groups.push({ start: groupStart, end: groupEnd, literal: text.slice(groupStart, groupEnd), replacement });
+    i = j + 1;
+  }
+  return groups;
 }
 
-function applyTermMatchesBracketed(text: string, termMatches: TermMatch[]): [string, string[]] {
+function wrapTermGroups(text: string, groups: TermGroup[]): string {
+  if (!groups.length) return text;
   const pieces: string[] = [];
-  const order: string[] = [];
   let cursor = 0;
-  termMatches.forEach((match) => {
-    pieces.push(text.slice(cursor, match.start), BRACKET_OPEN, match.source, BRACKET_CLOSE);
-    order.push(match.target);
-    cursor = match.end;
-  });
+  for (const g of groups) {
+    pieces.push(text.slice(cursor, g.start), NO_TRANSLATE_OPEN, g.literal, NO_TRANSLATE_CLOSE);
+    cursor = g.end;
+  }
   pieces.push(text.slice(cursor));
-  return [pieces.join(""), order];
-}
-
-function resolveBracketed(result: string, order: string[]): string | null {
-  const matches = [...result.matchAll(BRACKETED_TERM_PATTERN)];
-  if (matches.length !== order.length) return null;
-  let cursor = 0;
-  const pieces: string[] = [];
-  matches.forEach((m, idx) => {
-    pieces.push(result.slice(cursor, m.index), order[idx]);
-    cursor = m.index! + m[0].length;
-  });
-  pieces.push(result.slice(cursor));
   return pieces.join("");
+}
+
+function activateNoTranslateSpans(html: string): string {
+  return html.replace(NO_TRANSLATE_SENTINEL_PATTERN, '<span translate="no">$1</span>');
+}
+
+function escapeRegExpLiteral(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function applyTermSubstitution(translated: string, groups: TermGroup[], collapseSurroundingWhitespace: boolean): string {
+  let result = translated;
+  for (const g of groups) {
+    if (!result.includes(g.literal)) continue;
+    const pattern = collapseSurroundingWhitespace
+      ? new RegExp(`\\s*${escapeRegExpLiteral(g.literal)}\\s*`)
+      : new RegExp(escapeRegExpLiteral(g.literal));
+    result = result.replace(pattern, g.replacement);
+  }
+  return result;
 }
 
 function styleTagsIntact(sourceText: string, translatedText: string): boolean {
@@ -331,71 +336,31 @@ function stripStyleTags(text: string): string {
   return text.replace(STYLE_TAG_PATTERN, "");
 }
 
-function buildVariants(unit: Unit, targetLang: string): Record<string, VariantPayload> {
-  const { text, term_matches: matches = [], embed_ratio: ratio = 0 } = unit;
-  if (!matches.length) return { plain: { sourceText: text, mapping: {} } };
-  const [placeholderText, placeholderMapping] = applyTermMatches(text, matches, "placeholder");
-  if (ratio > EMBED_RATIO_THRESHOLD) return { placeholder: { sourceText: placeholderText, mapping: placeholderMapping } };
-  if (languageProfile(targetLang).usesLatinPunctuation) {
-    const [bracketedText, order] = applyTermMatchesBracketed(text, matches);
-    return {
-      bracketed: { sourceText: bracketedText, mapping: {}, bracketOrder: order },
-      placeholder: { sourceText: placeholderText, mapping: placeholderMapping },
-    };
-  }
-  const [embeddedText, embeddedMapping] = applyTermMatches(text, matches, "embedded");
-  return {
-    embedded: { sourceText: embeddedText, mapping: embeddedMapping },
-    placeholder: { sourceText: placeholderText, mapping: placeholderMapping },
-  };
-}
-
-function flattenUnits(units: Unit[], chapterOfUnit: Map<number, number>, targetLang: string) {
+function flattenUnits(units: Unit[], chapterOfUnit: Map<number, number>) {
   const items: Item[] = [];
   const chapterItems = new Map<number | undefined, string[]>();
   for (const unit of units) {
     const chapterId = chapterOfUnit.get(unit.id);
-    for (const [variant, payload] of Object.entries(buildVariants(unit, targetLang))) {
-      const itemId = `${unit.id}:${variant}`;
-      items.push({ id: itemId, text: payload.sourceText });
-      if (!chapterItems.has(chapterId)) chapterItems.set(chapterId, []);
-      chapterItems.get(chapterId)!.push(itemId);
-    }
+    const groups = buildTermGroups(unit.text, unit.term_matches);
+    const itemId = String(unit.id);
+    items.push({ id: itemId, text: wrapTermGroups(unit.text, groups) });
+    if (!chapterItems.has(chapterId)) chapterItems.set(chapterId, []);
+    chapterItems.get(chapterId)!.push(itemId);
   }
   return { items, chapterGroups: [...chapterItems.values()] };
 }
 
-function restorePlaceholders(text: string, mapping: Record<string, string>): string {
-  let result = text;
-  for (const [placeholder, target] of Object.entries(mapping)) result = result.split(placeholder).join(target);
-  return result;
-}
-
-function resolveTranslation(unit: Unit, translations: Map<string, string>, sourceLang: string, targetLang: string): [string | null, string | null, Record<string, string> | null] {
-  const variants = buildVariants(unit, targetLang);
-  for (const variant of VARIANT_PRIORITY) {
-    const payload = variants[variant];
-    if (!payload) continue;
-    const result = translations.get(`${unit.id}:${variant}`);
-    if (result === undefined) continue;
-
-    let resolved: string | null;
-    if (variant === "bracketed") {
-      resolved = payload.bracketOrder ? resolveBracketed(result, payload.bracketOrder) : null;
-      if (resolved === null) continue;
-    } else if (variant === "embedded" && "placeholder" in variants && isUntranslated(result, sourceLang, targetLang)) {
-      continue;
-    } else {
-      resolved = restorePlaceholders(result, payload.mapping);
-    }
-
-    if (!styleTagsIntact(unit.text, resolved)) {
-      log(`unit ${unit.id}: inline style tags lost or unbalanced after translation, stripping to avoid broken markup`);
-      resolved = stripStyleTags(resolved);
-    }
-    return [resolved, payload.sourceText, payload.mapping];
+function resolveTranslation(unit: Unit, translations: Map<string, string>, targetLang: string): [string | null, string | null] {
+  const result = translations.get(String(unit.id));
+  if (result === undefined) return [null, null];
+  const groups = buildTermGroups(unit.text, unit.term_matches);
+  const collapseWhitespace = languageProfile(targetLang).script === "cjk";
+  let resolved = groups.length ? applyTermSubstitution(result, groups, collapseWhitespace) : result;
+  if (!styleTagsIntact(unit.text, resolved)) {
+    log(`unit ${unit.id}: inline style tags lost or unbalanced after translation, stripping to avoid broken markup`);
+    resolved = stripStyleTags(resolved);
   }
-  return [null, null, null];
+  return [resolved, wrapTermGroups(unit.text, groups)];
 }
 
 function contentLength(text: string | null | undefined): number {
@@ -412,7 +377,7 @@ function isLengthPlausible(sourceText: string, translatedText: string): boolean 
 interface UntranslatedCandidate {
   unit: Unit;
   sourceText: string;
-  mapping: Record<string, string>;
+  groups: TermGroup[];
 }
 
 async function retryUntranslated(
@@ -422,10 +387,11 @@ async function retryUntranslated(
   const items = candidates.map((c) => ({ id: String(c.unit.id), text: c.sourceText }));
   const { batches } = buildBatches(items, items.map((i) => [i.id]), maxChars);
   const raw = await sendBatches(env, batches, sourceLang, targetLang, remainingBudgetMs(startedAt), resolver);
+  const collapseWhitespace = languageProfile(targetLang).script === "cjk";
   const recovered = new Map<number, string>();
   for (const c of candidates) {
     const text = raw.get(String(c.unit.id));
-    if (text !== undefined) recovered.set(c.unit.id, restorePlaceholders(text, c.mapping));
+    if (text !== undefined) recovered.set(c.unit.id, c.groups.length ? applyTermSubstitution(text, c.groups, collapseWhitespace) : text);
   }
   return recovered;
 }
@@ -554,6 +520,7 @@ export interface TranslateUnitsOptions {
   maxChars: number;
   startedAt: number;
   onLog?: (message: string) => void;
+  contextText?: string;
 }
 
 export async function translateUnits(
@@ -568,18 +535,18 @@ export async function translateUnits(
   const chapterOfUnit = new Map<number, number>();
   for (const chapter of chapters) for (const uid of chapter.unit_ids) chapterOfUnit.set(uid, chapter.id);
 
-  const { items, chapterGroups } = flattenUnits(pending, chapterOfUnit, targetLang);
+  const { items, chapterGroups } = flattenUnits(pending, chapterOfUnit);
   const { translations: translationsRaw } = items.length
-    ? await translate(env, items, chapterGroups, sourceLang, targetLang, maxChars, startedAt, resolver)
+    ? await translate(env, items, chapterGroups, sourceLang, targetLang, maxChars, startedAt, resolver, options.contextText)
     : { translations: new Map<string, string>() };
 
   const results = new Map<number, string | null>(resolved);
   const untranslatedCandidates: UntranslatedCandidate[] = [];
   for (const unit of pending) {
-    const [finalText, sourceText, mapping] = resolveTranslation(unit, translationsRaw, sourceLang, targetLang);
+    const [finalText, sourceText] = resolveTranslation(unit, translationsRaw, targetLang);
     results.set(unit.id, finalText);
     if (finalText !== null && isUntranslated(finalText, sourceLang, targetLang)) {
-      untranslatedCandidates.push({ unit, sourceText: sourceText || "", mapping: mapping || {} });
+      untranslatedCandidates.push({ unit, sourceText: sourceText || "", groups: buildTermGroups(unit.text, unit.term_matches) });
     }
   }
 

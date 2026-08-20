@@ -45,7 +45,11 @@ export function isLatinSource(sourceLang: string | undefined | null): boolean {
 const NAME_SEPARATOR_PATTERN = /[·・]/;
 const TERM_BOUNDARY_LEFT = "(?<![A-Za-z0-9])";
 const TERM_BOUNDARY_RIGHT = "(?![A-Za-z0-9])";
-const EMBED_RATIO_DEFAULT = 0.0;
+
+function termPattern(sourceTerm: string, global: boolean, caseSensitive: boolean): RegExp {
+  const flags = (global ? "g" : "") + (caseSensitive ? "" : "i");
+  return new RegExp(TERM_BOUNDARY_LEFT + escapeRegExp(sourceTerm) + TERM_BOUNDARY_RIGHT, flags);
+}
 
 export type Glossary = Record<string, string>;
 
@@ -173,11 +177,11 @@ function mergeReason(prevSeg: Segment, currSeg: Segment, latinSource: boolean): 
   return gap <= GAP_THRESHOLD_MS || firstLetterIsLower(currSeg.text) ? "gap" : null;
 }
 
-function findStutterResolution(text: string, glossary: Glossary): string | null {
+function findStutterResolution(text: string, glossary: Glossary, caseSensitive: boolean): string | null {
   const entries = Object.entries(glossary).sort((a, b) => b[0].length - a[0].length);
   for (const [sourceTerm, targetTerm] of entries) {
     if (!sourceTerm) continue;
-    const pattern = new RegExp(TERM_BOUNDARY_LEFT + escapeRegExp(sourceTerm) + TERM_BOUNDARY_RIGHT);
+    const pattern = termPattern(sourceTerm, false, caseSensitive);
     const match = pattern.exec(text);
     if (!match) continue;
     const residual = (text.slice(0, match.index).match(STUTTER_RESIDUAL_PATTERN) || []).length +
@@ -201,13 +205,13 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function findPureGlossaryLine(text: string, glossary: Glossary, latinSource: boolean): string | null {
+function findPureGlossaryLine(text: string, glossary: Glossary, latinSource: boolean, caseSensitive: boolean): string | null {
   let stripped = text;
   let matchedAny = false;
   const terms = Object.keys(glossary).sort((a, b) => b.length - a.length);
   for (const sourceTerm of terms) {
     if (!sourceTerm) continue;
-    const pattern = new RegExp(TERM_BOUNDARY_LEFT + escapeRegExp(sourceTerm) + TERM_BOUNDARY_RIGHT, "g");
+    const pattern = termPattern(sourceTerm, true, caseSensitive);
     if (pattern.test(stripped)) matchedAny = true;
     stripped = stripped.replace(pattern, "");
   }
@@ -216,18 +220,18 @@ function findPureGlossaryLine(text: string, glossary: Glossary, latinSource: boo
   const entries = Object.entries(glossary).sort((a, b) => b[0].length - a[0].length);
   for (const [sourceTerm, targetTerm] of entries) {
     if (!sourceTerm) continue;
-    const pattern = new RegExp(TERM_BOUNDARY_LEFT + escapeRegExp(sourceTerm) + TERM_BOUNDARY_RIGHT, "g");
+    const pattern = termPattern(sourceTerm, true, caseSensitive);
     resolved = resolved.replace(pattern, targetTerm);
   }
   return resolved;
 }
 
-function buildSegments(cues: Cue[], glossary: Glossary, latinSource: boolean, isolatedMergeMaxWords: number): Segment[] {
+function buildSegments(cues: Cue[], glossary: Glossary, latinSource: boolean, isolatedMergeMaxWords: number, caseSensitive: boolean): Segment[] {
   const segments: Segment[] = [];
   for (const cue of cues) {
     splitDialogue(cue.text).forEach((part, dashIndex) => {
-      let resolved = findPureGlossaryLine(part, glossary, latinSource);
-      if (!resolved && latinSource) resolved = findStutterResolution(part, glossary);
+      let resolved = findPureGlossaryLine(part, glossary, latinSource, caseSensitive);
+      if (!resolved && latinSource) resolved = findStutterResolution(part, glossary, caseSensitive);
       const text = resolved || !latinSource ? part : stripLetterStutter(part);
       segments.push({ cue_id: cue.id, text, start_ms: cue.start_ms, end_ms: cue.end_ms, resolved, dash_index: dashIndex });
     });
@@ -295,13 +299,13 @@ export function splitNamePair(original: string, translated: string): [string, st
   return pairs;
 }
 
-function matchGlossaryTerms(text: string, glossary: Glossary) {
+function matchGlossaryTerms(text: string, glossary: Glossary, caseSensitive: boolean) {
   const matches: { start: number; end: number; source: string; target: string }[] = [];
   const claimed: [number, number][] = [];
   const entries = Object.entries(glossary).sort((a, b) => b[0].length - a[0].length);
   for (const [sourceTerm, targetTerm] of entries) {
     if (!sourceTerm) continue;
-    const pattern = new RegExp(TERM_BOUNDARY_LEFT + escapeRegExp(sourceTerm) + TERM_BOUNDARY_RIGHT, "g");
+    const pattern = termPattern(sourceTerm, true, caseSensitive);
     let m: RegExpExecArray | null;
     while ((m = pattern.exec(text))) {
       const start = m.index, end = m.index + m[0].length;
@@ -311,9 +315,7 @@ function matchGlossaryTerms(text: string, glossary: Glossary) {
     }
   }
   matches.sort((a, b) => a.start - b.start);
-  if (!matches.length || !text) return { matches, embedRatio: EMBED_RATIO_DEFAULT };
-  const embeddedLen = text.length - matches.reduce((s, m) => s + (m.end - m.start), 0) + matches.reduce((s, m) => s + m.target.length, 0);
-  return { matches, embedRatio: embeddedLen / text.length };
+  return matches;
 }
 
 function joinGroupText(group: Segment[], isMusicGroup: boolean): string {
@@ -361,8 +363,8 @@ function chapterize(groups: Segment[][], sceneChangeMs: number): RawChapter[] {
   return chapters;
 }
 
-function buildUnits(cues: Cue[], glossary: Glossary, latinSource: boolean, isolatedMergeMaxWords: number, sceneChangeMs: number) {
-  const groups = groupSegments(buildSegments(cues, glossary, latinSource, isolatedMergeMaxWords), latinSource);
+function buildUnits(cues: Cue[], glossary: Glossary, latinSource: boolean, isolatedMergeMaxWords: number, sceneChangeMs: number, caseSensitive: boolean) {
+  const groups = groupSegments(buildSegments(cues, glossary, latinSource, isolatedMergeMaxWords, caseSensitive), latinSource);
   const units: Unit[] = [];
   const chapters: Chapter[] = [];
   let markerMerges = 0;
@@ -381,11 +383,11 @@ function buildUnits(cues: Cue[], glossary: Glossary, latinSource: boolean, isola
       }));
       markerMerges += group.filter((s) => s.marker_boundary).length;
       if (group.length === 1 && group[0].resolved) {
-        units.push({ id: unitId, spans, text: "", term_matches: [], embed_ratio: EMBED_RATIO_DEFAULT, resolved: group[0].resolved });
+        units.push({ id: unitId, spans, text: "", term_matches: [], resolved: group[0].resolved });
       } else {
         const text = joinGroupText(group, isMusicChapter);
-        const { matches, embedRatio } = matchGlossaryTerms(text, glossary);
-        units.push({ id: unitId, spans, text, term_matches: matches, embed_ratio: embedRatio, resolved: null });
+        const matches = matchGlossaryTerms(text, glossary, caseSensitive);
+        units.push({ id: unitId, spans, text, term_matches: matches, resolved: null });
       }
       unitIds.push(unitId);
     }
@@ -401,18 +403,20 @@ export interface ExtractOptions {
   targetLang?: string;
   isolatedMergeMaxWords?: number;
   sceneChangeSeconds?: number;
+  caseSensitiveTerms?: boolean;
 }
 
 export function extract(protocolCues: ProtocolCue[], glossary: Glossary, options: ExtractOptions = {}) {
   const sourceLang = options.sourceLang ?? "en";
   const isolatedMergeMaxWords = options.isolatedMergeMaxWords ?? 0;
   const sceneChangeMs = (options.sceneChangeSeconds ?? DEFAULT_SCENE_CHANGE_SECONDS) * 1000;
+  const caseSensitive = options.caseSensitiveTerms ?? false;
   const latinSource = isLatinSource(sourceLang);
   const preserveInlineStyleTags = languageProfile(options.targetLang).script !== "cjk";
   const cues = prepareCues(protocolCues, preserveInlineStyleTags);
   if (!cues.length) {
     return { success: false, cues: [], units: [], chapters: [], marker_merges: 0 };
   }
-  const { units, chapters, markerMerges } = buildUnits(cues, glossary, latinSource, isolatedMergeMaxWords, sceneChangeMs);
+  const { units, chapters, markerMerges } = buildUnits(cues, glossary, latinSource, isolatedMergeMaxWords, sceneChangeMs, caseSensitive);
   return { success: true, cues, units, chapters, marker_merges: markerMerges };
 }

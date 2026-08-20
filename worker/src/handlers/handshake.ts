@@ -1,4 +1,4 @@
-import { Env, STANDBY_TTL_MS, maxBatchChars } from "../env";
+import { Env, STANDBY_TTL_MS } from "../env";
 import { issueSession } from "../token";
 import { resolveSecretRing } from "../secret";
 import { hashIp, clientIp } from "../identity";
@@ -16,5 +16,5 @@ export async function handleHandshake(request: Request, env: Env, ctx: Execution
 
   const ring = await resolveSecretRing(env.WORKER_SECRET, env.WORKER_SALT || "");
   const [{ token, challengeKey, nonce }, stats] = await Promise.all([issueSession(ring, STANDBY_TTL_MS), loadStats(env)]);
-  return json({ token, challengeKey, nonce, maxChars: maxBatchChars(env), stats }, 200, origin, env);
+  return json({ token, challengeKey, nonce, stats }, 200, origin, env);
 }

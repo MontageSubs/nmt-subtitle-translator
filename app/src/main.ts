@@ -6,6 +6,7 @@ import { Cue, OutputMode, BilingualStacking } from "./core/types";
 import { handshake, completeTranslateJob, TranslateJobResponse } from "./core/workerClient";
 import { applySdhStripping } from "./core/sdh";
 import { detectSourceLanguage, isKnownSourceLanguage } from "./core/detect";
+import { CONTEXT_MAX_CHARS, validateContext } from "./core/context";
 import { loadBundledDictionary, entriesToGlossary, DictionaryEntry } from "./core/dictionary";
 import { mountGlossaryEditor } from "./components/glossaryEditor";
 import { openPreviewModal, PreviewCard } from "./components/previewModal";
@@ -32,7 +33,9 @@ interface AppState {
   stackingOrder: BilingualStacking;
   userPickedOutputMode: boolean;
   sdhEnabled: boolean;
+  caseSensitiveTerms: boolean;
   sceneSeconds: number;
+  contextText: string;
   glossaryEntries: DictionaryEntry[];
 }
 
@@ -48,7 +51,9 @@ const state: AppState = {
   stackingOrder: "translation_top",
   userPickedOutputMode: false,
   sdhEnabled: true,
+  caseSensitiveTerms: false,
   sceneSeconds: DEFAULT_SCENE_CHANGE_SECONDS,
+  contextText: "",
   glossaryEntries: [],
 };
 
@@ -120,6 +125,13 @@ function renderApp() {
           </div>
           <label class="switch"><input type="checkbox" id="sdh-toggle" ${state.sdhEnabled ? "checked" : ""} /><span class="switch__track"></span></label>
         </div>
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-row__label">${t("caseSensitiveTerms.label")}</div>
+            <div class="toggle-row__desc">${t("caseSensitiveTerms.desc")}</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="case-sensitive-toggle" ${state.caseSensitiveTerms ? "checked" : ""} /><span class="switch__track"></span></label>
+        </div>
         <div class="field slider-field">
           <div class="slider-field__row">
             <span>${t("scene.label")}</span>
@@ -128,6 +140,11 @@ function renderApp() {
           <input type="range" id="scene-seconds" min="${SCENE_SLIDER_MIN}" max="${SCENE_SLIDER_MAX}" step="1" value="${clamp(state.sceneSeconds, SCENE_SLIDER_MIN, SCENE_SLIDER_MAX)}" />
           <div class="slider-field__hint" id="scene-preview-hint">${t("scene.hint")}</div>
         </div>
+        <label class="field">
+          <span>${t("context.label")}</span>
+          <textarea id="context-input" rows="3" placeholder="${t("context.placeholder")}">${state.contextText}</textarea>
+          <div class="slider-field__hint" id="context-hint"></div>
+        </label>
       </section>
 
       <section class="step" id="start-step" ${state.srtFile ? "" : "hidden"}>
@@ -188,9 +205,12 @@ function wireApp() {
   const stackingField = document.getElementById("stacking-field") as HTMLElement;
   const stackingSelect = document.getElementById("stacking-order") as HTMLSelectElement;
   const sdhToggle = document.getElementById("sdh-toggle") as HTMLInputElement;
+  const caseSensitiveToggle = document.getElementById("case-sensitive-toggle") as HTMLInputElement;
   const sceneSecondsInput = document.getElementById("scene-seconds") as HTMLInputElement;
   const sceneSecondsNumber = document.getElementById("scene-seconds-number") as HTMLInputElement;
   const scenePreviewHint = document.getElementById("scene-preview-hint") as HTMLElement;
+  const contextInput = document.getElementById("context-input") as HTMLTextAreaElement;
+  const contextHint = document.getElementById("context-hint") as HTMLElement;
   const startButton = document.getElementById("start") as HTMLButtonElement;
   const progressCard = document.getElementById("progress-card") as HTMLElement;
   const progressLabel = document.getElementById("progress-label") as HTMLElement;
@@ -270,6 +290,12 @@ function wireApp() {
   });
   sceneSecondsNumber.addEventListener("blur", () => { sceneSecondsNumber.value = String(state.sceneSeconds); });
   sdhToggle.addEventListener("change", () => { state.sdhEnabled = sdhToggle.checked; });
+  caseSensitiveToggle.addEventListener("change", () => { state.caseSensitiveTerms = caseSensitiveToggle.checked; });
+  contextInput.addEventListener("input", () => {
+    state.contextText = contextInput.value;
+    const overLimit = state.contextText.trim().length > CONTEXT_MAX_CHARS;
+    contextHint.textContent = overLimit ? t("context.tooLong", { max: CONTEXT_MAX_CHARS }) : "";
+  });
 
   function appendLog(message: string) {
     logEl.textContent += `${message}\n`;
@@ -337,7 +363,19 @@ function wireApp() {
       const glossary = entriesToGlossary(state.glossaryEntries);
 
       const { cues: wireCues } = applySdhStripping(state.lastCues, sourceLang, stripSdhEnabled);
-      const job = await completeTranslateJob({ cues: wireCues, glossary, source: sourceLang, target: targetLang, sceneChangeSeconds }, appendLog);
+
+      let contextText: string | undefined;
+      if (state.contextText.trim()) {
+        const validation = await validateContext(state.contextText, sourceLang);
+        if (validation.languageMismatch) {
+          contextHint.textContent = t("context.languageMismatch", { code: validation.detectedCode || "?" });
+        } else {
+          contextText = validation.text || undefined;
+          contextHint.textContent = validation.truncated ? t("context.tooLong", { max: CONTEXT_MAX_CHARS }) : "";
+        }
+      }
+
+      const job = await completeTranslateJob({ cues: wireCues, glossary, source: sourceLang, target: targetLang, sceneChangeSeconds, caseSensitiveTerms: state.caseSensitiveTerms, contextText }, appendLog);
       if (!job.success) throw new Error(t("error.parseFailed"));
       state.lastJobResult = job;
       state.lastRenderMode = outputMode;

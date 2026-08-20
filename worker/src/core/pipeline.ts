@@ -10,6 +10,8 @@ export interface TranslateJobRequest {
   source: string;
   target: string;
   sceneChangeSeconds?: number;
+  caseSensitiveTerms?: boolean;
+  contextText?: string;
 }
 
 export interface TranslateJobResult extends MergeResult {
@@ -20,13 +22,16 @@ export interface TranslateJobResult extends MergeResult {
 export async function runTranslateJob(
   env: Env, job: TranslateJobRequest, maxChars: number, startedAt: number, onLog?: (message: string) => void
 ): Promise<TranslateJobResult> {
-  const extracted = extract(job.cues, job.glossary, { sourceLang: job.source, targetLang: job.target, sceneChangeSeconds: job.sceneChangeSeconds });
+  const extracted = extract(job.cues, job.glossary, {
+    sourceLang: job.source, targetLang: job.target, sceneChangeSeconds: job.sceneChangeSeconds, caseSensitiveTerms: job.caseSensitiveTerms,
+  });
   if (!extracted.success) {
     return { success: false, resolved_source_lang: job.source, cues: [], approx_splits: [], missing_count: 0, missing_cues: [] };
   }
 
   const { translations, resolvedSourceLang } = await translateUnits(
-    env, extracted.units, extracted.chapters, extracted.cues, job.source, job.target, { maxChars, startedAt, onLog }
+    env, extracted.units, extracted.chapters, extracted.cues, job.source, job.target,
+    { maxChars, startedAt, onLog, contextText: job.contextText }
   );
   const merged = await merge(extracted.cues, extracted.units, translations, job.source, job.target);
 

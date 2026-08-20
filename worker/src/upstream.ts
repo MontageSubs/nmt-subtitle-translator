@@ -14,9 +14,8 @@ export interface UpstreamTranslation {
 const LANG_CODE_PATTERN = /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/;
 
 function extractDetectedLang(payload: unknown): string | null {
-  const candidates = [(payload as any)?.[0]?.[1], (payload as any)?.[1]];
-  for (const c of candidates) if (typeof c === "string" && LANG_CODE_PATTERN.test(c)) return c;
-  return null;
+  const candidate = (payload as any)?.[1]?.[0];
+  return typeof candidate === "string" && LANG_CODE_PATTERN.test(candidate) ? candidate : null;
 }
 
 export async function fetchUpstreamTranslation(env: Env, text: string, source: string, target: string, signal?: AbortSignal): Promise<UpstreamTranslation> {
