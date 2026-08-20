@@ -15,14 +15,15 @@ export function truncateContext(text: string, maxChars = CONTEXT_MAX_CHARS): { t
 export interface ContextValidation {
   text: string;
   truncated: boolean;
-  languageMismatch: boolean;
+  needsTranslation: boolean;
   detectedCode?: string;
 }
 
 export async function validateContext(raw: string, sourceLang: string): Promise<ContextValidation> {
   const { text, truncated } = truncateContext(raw);
-  if (!text || sourceLang === "auto") return { text, truncated, languageMismatch: false };
+  if (!text) return { text, truncated, needsTranslation: false };
+  if (sourceLang === "auto") return { text, truncated, needsTranslation: true };
   const detected = await detectSourceLanguage([{ text }]);
-  const languageMismatch = Boolean(detected && detected.reliable && detected.code.split("-")[0] !== sourceLang.split("-")[0]);
-  return { text, truncated, languageMismatch, detectedCode: detected?.code };
+  const needsTranslation = Boolean(detected && detected.reliable && detected.code.split("-")[0] !== sourceLang.split("-")[0]);
+  return { text, truncated, needsTranslation, detectedCode: detected?.code };
 }

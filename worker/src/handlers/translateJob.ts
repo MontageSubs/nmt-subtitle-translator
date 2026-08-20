@@ -16,6 +16,7 @@ import { ProtocolCue, canonicalizeCues, isValidProtocolCue } from "../protocol";
 import { sha256Hex } from "../crypto";
 import { issueRetryToken, verifyRetryToken, canonicalCueContent, RETRY_TOKEN_GUARD_TTL_MS } from "../retryToken";
 import { consumeRetryTokenOnce } from "../retryTokenGuard";
+import { MAX_CONTEXT_CHARS } from "../core/retryEscalation";
 
 interface TranslateJobRequestBody {
   token?: string;
@@ -27,6 +28,7 @@ interface TranslateJobRequestBody {
   sceneChangeSeconds?: number;
   caseSensitiveTerms?: boolean;
   contextText?: string;
+  contextNeedsTranslation?: boolean;
   clearance?: string;
   probeBitmap?: number;
   retryToken?: string;
@@ -35,7 +37,6 @@ interface TranslateJobRequestBody {
 const MAX_GLOSSARY_ENTRIES = 500;
 const MAX_GLOSSARY_ENTRY_CHARS = 200;
 const MAX_CUES_PER_REQUEST = 20_000;
-const MAX_CONTEXT_CHARS = 500;
 
 function isValidGlossary(value: unknown): value is Glossary {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -103,6 +104,7 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
   const contextText = !isRetryContinuation && typeof body.contextText === "string"
     ? body.contextText.trim().slice(0, MAX_CONTEXT_CHARS)
     : undefined;
+  const contextNeedsTranslation = !isRetryContinuation && Boolean(body.contextNeedsTranslation);
 
   const contentLimit = maxContentChars(env);
   const totalChars = cues.reduce((sum, cue) => sum + cue.text.length, 0);
@@ -146,7 +148,7 @@ export async function handleTranslateJob(request: Request, env: Env, ctx: Execut
   return ndjsonStream(ctx, origin, env, async (emit) => {
     let job: Awaited<ReturnType<typeof runTranslateJob>>;
     try {
-      job = await runTranslateJob(env, { cues, glossary, source, target, sceneChangeSeconds, caseSensitiveTerms, contextText }, maxBatchChars(env), startedAt, (message) => emit({ type: "log", message }));
+      job = await runTranslateJob(env, { cues, glossary, source, target, sceneChangeSeconds, caseSensitiveTerms, contextText, contextNeedsTranslation }, maxBatchChars(env), startedAt, (message) => emit({ type: "log", message }));
     } catch (e) {
       reportError("translate job failed", e);
       await emit({ type: "error", message: "translate job failed" });

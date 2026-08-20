@@ -1,6 +1,6 @@
 import { Env } from "../env";
 import { extract, Glossary } from "./srtExtract";
-import { translateUnits } from "./retryEscalation";
+import { translateUnits, resolveContext } from "./retryEscalation";
 import { merge, MergeResult } from "./bilingualMerge";
 import { ProtocolCue } from "../protocol";
 
@@ -12,6 +12,7 @@ export interface TranslateJobRequest {
   sceneChangeSeconds?: number;
   caseSensitiveTerms?: boolean;
   contextText?: string;
+  contextNeedsTranslation?: boolean;
 }
 
 export interface TranslateJobResult extends MergeResult {
@@ -29,11 +30,15 @@ export async function runTranslateJob(
     return { success: false, resolved_source_lang: job.source, cues: [], approx_splits: [], missing_count: 0, missing_cues: [] };
   }
 
-  const { translations, resolvedSourceLang } = await translateUnits(
-    env, extracted.units, extracted.chapters, extracted.cues, job.source, job.target,
-    { maxChars, startedAt, onLog, contextText: job.contextText }
+  const { sourceLang, contextText } = await resolveContext(
+    env, job.contextText, job.contextNeedsTranslation, job.source, job.target, extracted.cues, maxChars, startedAt, onLog
   );
-  const merged = await merge(extracted.cues, extracted.units, translations, job.source, job.target);
+
+  const { translations, resolvedSourceLang } = await translateUnits(
+    env, extracted.units, extracted.chapters, extracted.cues, sourceLang, job.target,
+    { maxChars, startedAt, onLog, contextText }
+  );
+  const merged = await merge(extracted.cues, extracted.units, translations, sourceLang, job.target);
 
   return { success: true, resolved_source_lang: resolvedSourceLang, ...merged };
 }

@@ -143,6 +143,7 @@ function renderApp() {
         <label class="field">
           <span>${t("context.label")}</span>
           <textarea id="context-input" rows="3" placeholder="${t("context.placeholder")}">${state.contextText}</textarea>
+          <span class="field__counter" id="context-counter">${state.contextText.trim().length}/${CONTEXT_MAX_CHARS}</span>
           <div class="slider-field__hint" id="context-hint"></div>
         </label>
       </section>
@@ -210,6 +211,7 @@ function wireApp() {
   const sceneSecondsNumber = document.getElementById("scene-seconds-number") as HTMLInputElement;
   const scenePreviewHint = document.getElementById("scene-preview-hint") as HTMLElement;
   const contextInput = document.getElementById("context-input") as HTMLTextAreaElement;
+  const contextCounter = document.getElementById("context-counter") as HTMLElement;
   const contextHint = document.getElementById("context-hint") as HTMLElement;
   const startButton = document.getElementById("start") as HTMLButtonElement;
   const progressCard = document.getElementById("progress-card") as HTMLElement;
@@ -293,7 +295,10 @@ function wireApp() {
   caseSensitiveToggle.addEventListener("change", () => { state.caseSensitiveTerms = caseSensitiveToggle.checked; });
   contextInput.addEventListener("input", () => {
     state.contextText = contextInput.value;
-    const overLimit = state.contextText.trim().length > CONTEXT_MAX_CHARS;
+    const length = state.contextText.trim().length;
+    const overLimit = length > CONTEXT_MAX_CHARS;
+    contextCounter.textContent = `${length}/${CONTEXT_MAX_CHARS}`;
+    contextCounter.classList.toggle("field__counter--over", overLimit);
     contextHint.textContent = overLimit ? t("context.tooLong", { max: CONTEXT_MAX_CHARS }) : "";
   });
 
@@ -365,17 +370,20 @@ function wireApp() {
       const { cues: wireCues } = applySdhStripping(state.lastCues, sourceLang, stripSdhEnabled);
 
       let contextText: string | undefined;
+      let contextNeedsTranslation = false;
       if (state.contextText.trim()) {
         const validation = await validateContext(state.contextText, sourceLang);
-        if (validation.languageMismatch) {
-          contextHint.textContent = t("context.languageMismatch", { code: validation.detectedCode || "?" });
-        } else {
-          contextText = validation.text || undefined;
-          contextHint.textContent = validation.truncated ? t("context.tooLong", { max: CONTEXT_MAX_CHARS }) : "";
-        }
+        contextText = validation.text || undefined;
+        contextNeedsTranslation = validation.needsTranslation;
+        contextHint.textContent = validation.needsTranslation
+          ? t("context.willTranslate", { code: validation.detectedCode || "?" })
+          : validation.truncated ? t("context.tooLong", { max: CONTEXT_MAX_CHARS }) : "";
       }
 
-      const job = await completeTranslateJob({ cues: wireCues, glossary, source: sourceLang, target: targetLang, sceneChangeSeconds, caseSensitiveTerms: state.caseSensitiveTerms, contextText }, appendLog);
+      const job = await completeTranslateJob(
+        { cues: wireCues, glossary, source: sourceLang, target: targetLang, sceneChangeSeconds, caseSensitiveTerms: state.caseSensitiveTerms, contextText, contextNeedsTranslation },
+        appendLog
+      );
       if (!job.success) throw new Error(t("error.parseFailed"));
       state.lastJobResult = job;
       state.lastRenderMode = outputMode;

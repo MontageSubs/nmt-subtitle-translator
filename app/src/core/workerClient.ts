@@ -203,6 +203,7 @@ export interface TranslateJobPayload {
   sceneChangeSeconds?: number;
   caseSensitiveTerms?: boolean;
   contextText?: string;
+  contextNeedsTranslation?: boolean;
   retryToken?: string;
 }
 
@@ -292,7 +293,7 @@ export async function completeTranslateJob(job: TranslateJobPayload, onLog?: (me
     const missingIds = new Set(result.missing_cues);
     const outstandingCues = job.cues.filter((cue) => missingIds.has(cue.id));
     if (!outstandingCues.length) break;
-    const retryResult = await postTranslateJob({ ...job, cues: outstandingCues, retryToken: result.retry_token, contextText: undefined }, onLog);
+    const retryResult = await postTranslateJob({ ...job, cues: outstandingCues, retryToken: result.retry_token, contextText: undefined, contextNeedsTranslation: undefined }, onLog);
     const translatedById = new Map(retryResult.cues.map((cue) => [cue.id, cue]));
     result = { ...retryResult, cues: result.cues.map((cue) => translatedById.get(cue.id) ?? cue) };
   }

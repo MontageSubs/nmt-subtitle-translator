@@ -33,7 +33,7 @@ export const en: Record<keyof typeof zh, string> = {
   "context.label": "Context (optional)",
   "context.placeholder": "A short paragraph of background (setting, tone, relationships) to help translation quality — not included in the output.",
   "context.tooLong": "Only the first {max} characters will be sent, the rest is ignored.",
-  "context.languageMismatch": "This doesn't look like the subtitle's source language (detected {code}) — it will not be sent.",
+  "context.willTranslate": "Detected as {code} — will be translated to match the subtitle before use.",
   "scene.label": "Scene-split interval (seconds)",
   "scene.hint": "A shorter interval splits scenes more finely and may reduce cross-cue consistency; a longer interval means larger single translation requests.",
   "scene.preview": "This setting splits into about {count} scenes. Shorter intervals mean finer splits (and possibly less consistency); longer intervals mean larger requests.",

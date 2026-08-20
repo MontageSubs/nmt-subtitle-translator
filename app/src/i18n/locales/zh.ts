@@ -31,7 +31,7 @@ export const zh = {
   "context.label": "背景上下文（可选）",
   "context.placeholder": "一小段背景信息（场景、基调、人物关系），仅用于辅助翻译理解，不会出现在最终字幕里。",
   "context.tooLong": "只会发送前 {max} 字，其余部分会被忽略。",
-  "context.languageMismatch": "这段内容似乎不是字幕的原始语言（识别为 {code}），不会被发送。",
+  "context.willTranslate": "识别为 {code}——发送前会自动翻译成与字幕一致的语言。",
   "scene.label": "场景切分间隔（秒）",
   "scene.hint": "间隔越短，场景切分越细，上下文一致性可能下降；间隔越长，单次翻译请求越大。",
   "scene.preview": "当前设置将切分为约 {count} 个场景。间隔越短切分越细、上下文一致性可能下降；间隔越长单次翻译请求越大。",

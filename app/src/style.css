@@ -85,7 +85,10 @@ select, input[type="text"], input[type="number"], textarea {
   padding: 9px 10px;
   font-size: 0.9rem;
   font-family: inherit;
+  width: 100%;
+  max-width: 100%;
 }
+textarea { resize: vertical; }
 select:focus, input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .primary {
@@ -151,6 +154,8 @@ select:focus, input:focus, textarea:focus { outline: 2px solid var(--accent); ou
   padding: 3px 8px;
 }
 .slider-field__hint { color: var(--muted); font-size: 0.78rem; margin-top: 6px; line-height: 1.5; }
+.field__counter { align-self: flex-end; color: var(--muted); font-size: 0.78rem; font-family: var(--mono); }
+.field__counter--over { color: var(--accent); font-weight: 600; }
 
 .glossary__toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .glossary__rows { display: flex; flex-direction: column; gap: 8px; }

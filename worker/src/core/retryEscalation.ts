@@ -68,6 +68,64 @@ function log(message: string) {
   coreLog("translate", message);
 }
 
+export const MAX_CONTEXT_CHARS = 500;
+const CONTEXT_PROBE_SAMPLE_CHARS = 200;
+
+async function probeSourceLanguage(env: Env, cues: Cue[], targetLang: string, startedAt: number): Promise<string | null> {
+  const sample = cues.map((c) => c.text).join(" ").trim().slice(0, CONTEXT_PROBE_SAMPLE_CHARS);
+  if (!sample) return null;
+  try {
+    const upstream = await fetchUpstreamTranslation(env, escapeHtml(sample), "auto", targetLang, AbortSignal.timeout(remainingBudgetMs(startedAt)));
+    return upstream.detectedLang;
+  } catch (e) {
+    log(`context: source-language probe failed, falling back to auto: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+export interface ContextResolution {
+  sourceLang: string;
+  contextText: string | undefined;
+}
+
+/**
+ * 保证正式翻译发出的上下文永远与字幕原文语言一致：本地识别到语言不符时，前端仍然发送内容，
+ * 只是打上 needsTranslation 标记，交由这里统一在服务端完成转换——避免"先要知道字幕语言，
+ * 才能判断上下文该不该翻译；但字幕语言又要靠翻译过程本身才能确定"的先有鸡还是先有蛋问题。
+ */
+export async function resolveContext(
+  env: Env, contextText: string | undefined, needsTranslation: boolean | undefined,
+  sourceLang: string, targetLang: string, cues: Cue[], maxChars: number, startedAt: number, onLog?: (message: string) => void
+): Promise<ContextResolution> {
+  if (!contextText) return { sourceLang, contextText: undefined };
+
+  let resolvedSourceLang = sourceLang;
+  let resolvedContext = contextText;
+
+  if (needsTranslation) {
+    if (resolvedSourceLang === "auto") {
+      onLog?.("context: subtitle source language unknown, sampling a probe translation to resolve it first");
+      resolvedSourceLang = (await probeSourceLanguage(env, cues, targetLang, startedAt)) || resolvedSourceLang;
+    }
+    if (resolvedSourceLang !== "auto") {
+      onLog?.(`context: translating supplied context into ${resolvedSourceLang} to match the subtitle`);
+      try {
+        const upstream = await fetchUpstreamTranslation(
+          env, escapeHtml(contextText), "auto", resolvedSourceLang, AbortSignal.timeout(remainingBudgetMs(startedAt))
+        );
+        resolvedContext = unescapeHtml(upstream.translatedHtml);
+      } catch (e) {
+        onLog?.("context: translation failed, using the original text as-is");
+        log(`context translation failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  const cap = Math.min(MAX_CONTEXT_CHARS, maxChars);
+  if (resolvedContext.length > cap) resolvedContext = resolvedContext.slice(0, cap);
+  return { sourceLang: resolvedSourceLang, contextText: resolvedContext };
+}
+
 function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
