@@ -175,21 +175,32 @@ function classifyBoundary(text: string): BoundaryName | null {
   return null;
 }
 
-function resolveAnchorCuts(text: string, boundaryTypes: (BoundaryName | null)[], protectedSpans: [number, number][]): Map<number, number> {
-  const indicesByType = new Map<BoundaryName, number[]>();
-  boundaryTypes.forEach((boundary, i) => {
-    if (boundary) {
-      if (!indicesByType.has(boundary)) indicesByType.set(boundary, []);
-      indicesByType.get(boundary)!.push(i);
-    }
-  });
+function countBoundaryOccurrences(text: string, boundary: BoundaryName): number {
+  const pattern = BOUNDARY_SEARCH_PATTERNS[boundary];
+  pattern.lastIndex = 0;
+  let count = 0;
+  while (pattern.exec(text)) count++;
+  return count;
+}
+
+function resolveAnchorCuts(text: string, spans: Span[], boundaryTypes: (BoundaryName | null)[], protectedSpans: [number, number][]): Map<number, number> {
+  const candidatesByType = new Map<BoundaryName, number[]>();
+  const consumedByType = new Map<BoundaryName, number>();
   const anchors = new Map<number, number>();
-  for (const [boundary, indices] of indicesByType) {
-    const candidates = [...text.matchAll(BOUNDARY_SEARCH_PATTERNS[boundary])]
-      .filter((m) => !insideProtectedSpan(m.index! + m[0].length, protectedSpans) && !isLeadingPunctRun(text, m.index!))
-      .map((m) => m.index! + m[0].length);
-    if (candidates.length === indices.length) indices.forEach((idx, i) => anchors.set(idx, candidates[i]));
-  }
+  boundaryTypes.forEach((boundary, i) => {
+    if (!boundary) return;
+    if (!candidatesByType.has(boundary)) {
+      const candidates = [...text.matchAll(BOUNDARY_SEARCH_PATTERNS[boundary])]
+        .filter((m) => !insideProtectedSpan(m.index! + m[0].length, protectedSpans) && !isLeadingPunctRun(text, m.index!))
+        .map((m) => m.index! + m[0].length);
+      candidatesByType.set(boundary, candidates);
+    }
+    const candidates = candidatesByType.get(boundary)!;
+    const consumed = consumedByType.get(boundary) ?? 0;
+    const need = countBoundaryOccurrences(spans[i].text, boundary);
+    if (need > 0 && consumed + need - 1 < candidates.length) anchors.set(i, candidates[consumed + need - 1]);
+    consumedByType.set(boundary, consumed + need);
+  });
   return anchors;
 }
 
@@ -308,7 +319,7 @@ function splitByBoundary(
   translatedText: string, spans: Span[], protectedSpans: [number, number][], targetLang: string, sourceLang: string | undefined, cutFn: SyncCutter | null
 ): [string[], string] {
   const boundaryTypes = spans.slice(0, -1).map((span) => classifyBoundary(span.text));
-  const anchors = punctuationAnchorsEnabled(sourceLang, targetLang) ? resolveAnchorCuts(translatedText, boundaryTypes, protectedSpans) : new Map<number, number>();
+  const anchors = punctuationAnchorsEnabled(sourceLang, targetLang) ? resolveAnchorCuts(translatedText, spans, boundaryTypes, protectedSpans) : new Map<number, number>();
   const lengths = spans.map((span) => effectiveLength(span.text));
   const total = lengths.reduce((a, b) => a + b, 0) || 1;
 
