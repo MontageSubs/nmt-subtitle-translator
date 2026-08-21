@@ -22,7 +22,7 @@ const NO_TRANSLATE_SENTINEL_PATTERN = /\u2045([\s\S]*?)\u2046/g;
 
 const BATCH_PACK_RATIO = 0.9;
 const INDEX_DIGITS_ESTIMATE = 4;
-const SPAN_MARKUP_OVERHEAD = "<span id=></span>".length + INDEX_DIGITS_ESTIMATE + groupMarker("0".repeat(INDEX_DIGITS_ESTIMATE)).length;
+const SPAN_MARKUP_OVERHEAD = "<span id=></span>".length + INDEX_DIGITS_ESTIMATE + groupMarker("0".repeat(INDEX_DIGITS_ESTIMATE)).length + 2;
 const CHAPTER_WRAPPER_OVERHEAD = "<div></div>".length;
 
 function escapedLength(text: string): number {
@@ -205,10 +205,10 @@ function buildChapterHtml(group: Item[], indices: Map<string, number>, contextTe
   const spans = group
     .map((item) => {
       const idx = indices.get(item.id)!;
-      return `<span id=${idx}>${groupMarker(idx)}${escapeHtml(item.text)}</span>`;
+      return `<span id=${idx}>${NO_TRANSLATE_OPEN}${groupMarker(idx)}${NO_TRANSLATE_CLOSE}${escapeHtml(item.text)}</span>`;
     })
     .join("");
-  const context = contextText ? `<span>${groupMarker("ctx")}${escapeHtml(contextText)}</span>` : "";
+  const context = contextText ? `<span>${NO_TRANSLATE_OPEN}${groupMarker("ctx")}${NO_TRANSLATE_CLOSE}${escapeHtml(contextText)}</span>` : "";
   return `<div>${context}${spans}</div>`;
 }
 
@@ -460,7 +460,7 @@ function buildWindowPlan(units: Unit[], suspectId: number, batchChars: number): 
   const window = units.slice(Math.max(0, i - WINDOW_CONTEXT_RADIUS), i + WINDOW_CONTEXT_RADIUS + 1);
   if (window.length < 2) return null;
   const pieces = [window[0].text];
-  for (const unit of window.slice(1)) pieces.push(` ${UNIT_MARKER_TEMPLATE(unit.id)} `, unit.text);
+  for (const unit of window.slice(1)) pieces.push(` ${NO_TRANSLATE_OPEN}${UNIT_MARKER_TEMPLATE(unit.id)}${NO_TRANSLATE_CLOSE} `, unit.text);
   const windowedText = pieces.join("");
   if (!withinBudget(windowedText, batchChars)) return null;
   const expectedIds = window.slice(1).map((u) => u.id);
@@ -526,7 +526,7 @@ function patchMissingCues(text: string, expectedIds: number[], recovered: Map<nu
 function buildIsolatedDivs(cueIds: number[], cueTextById: Map<number, string>): string {
   return cueIds
     .filter((cid) => cueTextById.has(cid))
-    .map((cid) => `<div>${CUE_MARKER_TEMPLATE(cid)} ${escapeHtml(cueTextById.get(cid)!)}</div>`)
+    .map((cid) => `<div><span translate="no">${CUE_MARKER_TEMPLATE(cid)}</span> ${escapeHtml(cueTextById.get(cid)!)}</div>`)
     .join("");
 }
 

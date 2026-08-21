@@ -18,7 +18,8 @@ function stripTags(line: string, preserveInlineStyleTags: boolean): string {
 }
 const WHITESPACE_PATTERN = /\s+/g;
 const TERMINAL_PUNCT_PATTERN = /[.!?。！？][’”"')\]」』】）]*\s*$/;
-const TRAILING_CONTINUATION_PATTERN = /(\.{2,}|-{2,}|…)\s*$/;
+const TRAILING_ELLIPSIS_PATTERN = /(\.{2,}|…)\s*$/;
+const TRAILING_CUTOFF_PATTERN = /-{2,}\s*$/;
 const DIALOGUE_DASH_PATTERN = /(?:^|(?<=\s))-(?!-)\s?/g;
 const STUTTER_WORD_PATTERN = /(?<![A-Za-z])([A-Za-z])-\1(?![A-Za-z])/gi;
 const STUTTER_PREFIX_PATTERN = /(?<![A-Za-z])([A-Za-z])-(?=\1[a-z])/gi;
@@ -106,7 +107,8 @@ function splitDialogue(text: string): string[] {
 }
 
 function hasTerminalPunct(text: string): boolean {
-  if (TRAILING_CONTINUATION_PATTERN.test(text)) return false;
+  if (TRAILING_ELLIPSIS_PATTERN.test(text)) return false;
+  if (TRAILING_CUTOFF_PATTERN.test(text)) return true;
   return TERMINAL_PUNCT_PATTERN.test(text);
 }
 

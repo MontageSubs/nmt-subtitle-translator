@@ -4,6 +4,7 @@ import { msToSrtTime } from "./core/srtRender";
 import { detectFormat, parseSubtitle, renderSubtitle, withExtension, ACCEPTED_EXTENSIONS } from "./core/subtitleFormat";
 import { SOURCE_LANGUAGES, TARGET_LANGUAGES, AUTO_DETECT_CODE, defaultOutputMode, languageProfile } from "./core/languageProfiles";
 import { Cue, OutputMode, BilingualStacking, SubtitleFormat } from "./core/types";
+import { decodeSubtitleBytes, encodeSubtitleText, SourceFormat } from "./core/encoding";
 import { handshake, completeTranslateJob, TranslateJobResponse } from "./core/workerClient";
 import { applySdhStripping } from "./core/sdh";
 import { detectSourceLanguage, isKnownSourceLanguage } from "./core/detect";
@@ -28,6 +29,7 @@ const app = document.getElementById("app")!;
 
 interface AppState {
   subtitleFile: File | null;
+  sourceFormat: SourceFormat | null;
   lastCues: Cue[];
   lastJobResult: TranslateJobResponse | null;
   lastRenderMode: OutputMode;
@@ -47,6 +49,7 @@ interface AppState {
 
 const state: AppState = {
   subtitleFile: null,
+  sourceFormat: null,
   lastCues: [],
   lastJobResult: null,
   lastRenderMode: "monolingual",
@@ -317,7 +320,8 @@ function wireApp() {
 
   async function handleFile(file: File) {
     state.subtitleFile = file;
-    const content = await file.text();
+    const { text: content, format } = decodeSubtitleBytes(new Uint8Array(await file.arrayBuffer()));
+    state.sourceFormat = format;
     dropzoneFile.textContent = t("dropzone.selected", { name: file.name });
     langStep.hidden = false;
     startStep.hidden = false;
@@ -413,7 +417,8 @@ function wireApp() {
       const originalById = new Map(state.lastCues.map((c) => [c.id, c]));
       const rendered = renderSubtitle(state.lastFormat, job.cues, originalById, outputMode, state.stackingOrder);
 
-      const blob = new Blob([rendered], { type: "text/plain;charset=utf-8" });
+      const outputFormat = state.sourceFormat ?? { encoding: "utf-8", bom: false, newline: "lf" as const };
+      const blob = new Blob([encodeSubtitleText(rendered, outputFormat) as BlobPart], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       downloadLink.href = url;
       downloadLink.download = withExtension(state.subtitleFile.name, state.lastFormat, targetLang);
