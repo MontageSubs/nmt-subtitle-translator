@@ -213,6 +213,7 @@ export interface TranslateJobResponse {
   approx_splits: { unit_id: number; cues: number[]; method: string }[];
   missing_count: number;
   missing_cues: number[];
+  quality_warnings: { cue_id: number; cps: number; over_cps: boolean; over_length: boolean }[];
   retry_token?: string;
 }
 

@@ -47,7 +47,7 @@ export const zh = {
 
   "preview.button": "下载前预览",
   "download.button": "下载字幕",
-  "result.summary": "完成：共 {cues} 条字幕，缺失翻译 {missing} 条，近似拆分 {splits} 处，跳过 {skipped} 个单元（详情见上方日志）。",
+  "result.summary": "完成：共 {cues} 条字幕，缺失翻译 {missing} 条，近似拆分 {splits} 处，跳过 {skipped} 个单元，{warnings} 条阅读速度提示（详情见上方日志）。",
   "error.parseFailed": "未能从文件中解析出任何字幕块，请确认文件是标准 SRT 格式。",
   "error.prefix": "错误：{message}",
   "captcha.text": "需要完成一次人机验证才能继续翻译",

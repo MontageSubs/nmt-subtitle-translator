@@ -62,6 +62,7 @@ export function mountGlossaryEditor(container: HTMLElement, initialEntries: Dict
     const targetLines = entries.map((e) => e.target).join("\n");
     return `<div class="glossary__bulk">
       <textarea id="glossary-bulk-source" placeholder="${t("glossary.bulkSourcePlaceholder")}">${escapeText(sourceLines)}</textarea>
+      <span class="glossary__bulk-arrow" aria-hidden="true">→</span>
       <textarea id="glossary-bulk-target" placeholder="${t("glossary.bulkTargetPlaceholder")}">${escapeText(targetLines)}</textarea>
     </div>`;
   }

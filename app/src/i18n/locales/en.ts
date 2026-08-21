@@ -49,7 +49,7 @@ export const en: Record<keyof typeof zh, string> = {
 
   "preview.button": "Preview before download",
   "download.button": "Download subtitles",
-  "result.summary": "Done: {cues} cues total, {missing} missing translations, {splits} approximate splits, {skipped} units skipped (see log above for details).",
+  "result.summary": "Done: {cues} cues total, {missing} missing translations, {splits} approximate splits, {skipped} units skipped, {warnings} reading-speed warnings (see log above for details).",
   "error.parseFailed": "No subtitle blocks could be parsed from this file — please confirm it is a standard SRT file.",
   "error.prefix": "Error: {message}",
   "captcha.text": "A human verification check is required to continue",

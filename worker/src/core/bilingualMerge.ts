@@ -1,6 +1,7 @@
 import { Cue, Unit, Span, BilingualCue } from "./types";
 import { isChineseTarget, languageProfile } from "./languageProfiles";
 import { getSyncCutter, registerGlossaryTerm, SyncCutter } from "./segmenter";
+import { evaluateLineMetrics } from "./lineMetrics";
 import { coreLog } from "./log";
 
 const ELLIPSIS_PATTERN = /\.{2,}|…+/g;
@@ -29,8 +30,13 @@ const BOUNDARY_SEARCH_PATTERNS: Record<BoundaryName, RegExp> = {
 const MARKER_PATTERN = /\u27e6c(\d+)\u27e7/g;
 const RESIDUAL_MARKER_PATTERN = /\s*\u27e6[^\u27e6\u27e7]*\u27e7\s*/g;
 
-function log(message: string) {
-  coreLog("merge", message);
+type Logger = (message: string) => void;
+
+function makeLogger(onLog?: Logger): Logger {
+  return (message) => {
+    coreLog("merge", message);
+    onLog?.(message);
+  };
 }
 
 function usesLatinPunctuation(sourceLang: string | undefined | null): boolean {
@@ -488,11 +494,19 @@ export interface ApproxSplit {
   method: string;
 }
 
+export interface QualityWarning {
+  cue_id: number;
+  cps: number;
+  over_cps: boolean;
+  over_length: boolean;
+}
+
 async function buildBilingualCues(
-  cues: Cue[], units: Unit[], translations: Record<string, string>, targetLang: string, sourceLang: string | undefined, cutFn: SyncCutter | null
-): Promise<{ cues: BilingualCue[]; approxSplits: ApproxSplit[] }> {
+  cues: Cue[], units: Unit[], translations: Record<string, string>, targetLang: string, sourceLang: string | undefined, cutFn: SyncCutter | null, log: Logger
+): Promise<{ cues: BilingualCue[]; approxSplits: ApproxSplit[]; qualityWarnings: QualityWarning[] }> {
   const cueSegments = new Map<number, [number, string | null][]>();
   const approxSplits: ApproxSplit[] = [];
+  const qualityWarnings: QualityWarning[] = [];
   const glossaryTerms = collectGlossaryTerms(units);
   const dashStyle = determineDashStyle(cues);
   const cueAllMusic = computeCueMusicFlags(units);
@@ -543,11 +557,15 @@ async function buildBilingualCues(
         translation = isChineseTarget(targetLang) ? POSITION_TOP_TAG + formatMusicLine(translation) : formatMusicLine(translation);
       } else {
         translation = restoreQuoteMarkers(translation, targetLang);
+        const metrics = evaluateLineMetrics(translation, cue.end_ms - cue.start_ms, targetLang);
+        if (metrics.overCps || metrics.overLength) {
+          qualityWarnings.push({ cue_id: cue.id, cps: metrics.cps, over_cps: metrics.overCps, over_length: metrics.overLength });
+        }
       }
     }
     results.push({ ...cue, translation });
   }
-  return { cues: results, approxSplits };
+  return { cues: results, approxSplits, qualityWarnings };
 }
 
 export interface MergeResult {
@@ -555,13 +573,15 @@ export interface MergeResult {
   approx_splits: ApproxSplit[];
   missing_count: number;
   missing_cues: number[];
+  quality_warnings: QualityWarning[];
 }
 
 export async function merge(
-  cues: Cue[], units: Unit[], translations: Record<string, string>, sourceLang: string, targetLang: string
+  cues: Cue[], units: Unit[], translations: Record<string, string>, sourceLang: string, targetLang: string, onLog?: Logger
 ): Promise<MergeResult> {
+  const log = makeLogger(onLog);
   const cutFn = await getSyncCutter(targetLang);
-  const { cues: mergedCues, approxSplits } = await buildBilingualCues(cues, units, translations, targetLang, sourceLang, cutFn);
+  const { cues: mergedCues, approxSplits, qualityWarnings } = await buildBilingualCues(cues, units, translations, targetLang, sourceLang, cutFn, log);
 
   const positionOfCue = new Map(mergedCues.map((cue, i) => [cue.id, i + 1]));
   const missingCues = mergedCues.filter((c) => c.translation === null).map((c) => c.id);
@@ -570,6 +590,10 @@ export async function merge(
     log(`approximate split: unit ${split.unit_id} / cues ${split.cues} / srt #${split.cues.map((c) => positionOfCue.get(c))} via ${split.method}`);
   }
   for (const cid of missingCues) log(`missing translation: cue ${cid} / srt #${positionOfCue.get(cid)}`);
+  for (const w of qualityWarnings) {
+    const reasons = [w.over_cps ? `${w.cps.toFixed(1)} cps` : null, w.over_length ? "line too long" : null].filter(Boolean).join(", ");
+    log(`reading-speed warning: cue ${w.cue_id} / srt #${positionOfCue.get(w.cue_id)} / ${reasons}`);
+  }
 
-  return { cues: mergedCues, approx_splits: approxSplits, missing_count: missingCues.length, missing_cues: missingCues };
+  return { cues: mergedCues, approx_splits: approxSplits, missing_count: missingCues.length, missing_cues: missingCues, quality_warnings: qualityWarnings };
 }

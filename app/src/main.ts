@@ -140,7 +140,7 @@ function renderApp() {
         </div>
         <label class="field">
           <span>${t("context.label")}</span>
-          <textarea id="context-input" rows="3" placeholder="${t("context.placeholder")}">${state.contextText}</textarea>
+          <textarea id="context-input" rows="3" placeholder="${t("context.placeholder")}"></textarea>
           <span class="field__counter" id="context-counter">${state.contextText.trim().length}/${CONTEXT_MAX_CHARS}</span>
           <div class="slider-field__hint" id="context-hint"></div>
         </label>
@@ -228,6 +228,7 @@ function wireApp() {
   fillSelect(targetSelect, TARGET_LANGUAGES, state.targetLang);
   outputModeSelect.value = state.outputMode;
   stackingSelect.value = state.stackingOrder;
+  contextInput.value = state.contextText;
   if (state.srtFile) dropzoneFile.textContent = t("dropzone.selected", { name: state.srtFile.name });
 
   const glossaryHandle = mountGlossaryEditor(glossaryEditorContainer, state.glossaryEntries);
@@ -407,6 +408,7 @@ function wireApp() {
 
       resultSummary.textContent = t("result.summary", {
         cues: job.cues.length, missing: job.missing_count, splits: job.approx_splits.length, skipped: job.missing_cues.length,
+        warnings: job.quality_warnings.length,
       });
       resultCard.hidden = false;
       progressLabel.textContent = t("progress.done");

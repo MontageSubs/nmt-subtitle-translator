@@ -3,8 +3,10 @@ import { en } from "./locales/en";
 
 export type LocaleCode = "zh" | "en";
 export type TranslationKey = keyof typeof zh;
+export type TextDirection = "ltr" | "rtl";
 
 const DICTIONARIES: Record<LocaleCode, Record<TranslationKey, string>> = { zh, en };
+const LOCALE_DIRECTIONS: Record<LocaleCode, TextDirection> = { zh: "ltr", en: "ltr" };
 const LOCALE_STORAGE_KEY = "nmt_locale";
 
 function detectInitialLocale(): LocaleCode {
@@ -13,17 +15,28 @@ function detectInitialLocale(): LocaleCode {
   return navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
 
+function applyDocumentDirection(locale: LocaleCode): void {
+  document.documentElement.lang = locale;
+  document.documentElement.dir = LOCALE_DIRECTIONS[locale];
+}
+
 let currentLocale: LocaleCode = detectInitialLocale();
+applyDocumentDirection(currentLocale);
 const listeners = new Set<(locale: LocaleCode) => void>();
 
 export function getLocale(): LocaleCode {
   return currentLocale;
 }
 
+export function getDirection(): TextDirection {
+  return LOCALE_DIRECTIONS[currentLocale];
+}
+
 export function setLocale(locale: LocaleCode): void {
   if (locale === currentLocale) return;
   currentLocale = locale;
   localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+  applyDocumentDirection(locale);
   listeners.forEach((fn) => fn(locale));
 }
 

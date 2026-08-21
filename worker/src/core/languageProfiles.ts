@@ -9,6 +9,8 @@ export interface LanguageProfile {
   enableSpeakerTagStrip: boolean;
   enableStutterResolution: boolean;
   enableDashDialogueSplit: boolean;
+  maxCharsPerLine: number;
+  readingSpeedCps: number;
 }
 
 interface ProfileOverrides {
@@ -19,10 +21,19 @@ interface ProfileOverrides {
   enableSpeakerTagStrip?: boolean;
   enableStutterResolution?: boolean;
   enableDashDialogueSplit?: boolean;
+  maxCharsPerLine?: number;
+  readingSpeedCps?: number;
 }
+
+const WRITING_SYSTEM_METRICS: Record<WritingSystem, { maxCharsPerLine: number; readingSpeedCps: number }> = {
+  cjk: { maxCharsPerLine: 16, readingSpeedCps: 9 },
+  latin: { maxCharsPerLine: 42, readingSpeedCps: 20 },
+  other: { maxCharsPerLine: 42, readingSpeedCps: 17 },
+};
 
 function profile(code: string, writingSystem: WritingSystem, overrides: ProfileOverrides = {}): LanguageProfile {
   const isLatin = writingSystem === "latin";
+  const metrics = WRITING_SYSTEM_METRICS[writingSystem];
   return {
     code, writingSystem,
     script: overrides.script ?? (writingSystem === "cjk" ? "cjk" : writingSystem === "latin" ? "latin" : "other"),
@@ -31,6 +42,8 @@ function profile(code: string, writingSystem: WritingSystem, overrides: ProfileO
     enableSpeakerTagStrip: overrides.enableSpeakerTagStrip ?? isLatin,
     enableStutterResolution: overrides.enableStutterResolution ?? isLatin,
     enableDashDialogueSplit: overrides.enableDashDialogueSplit ?? true,
+    maxCharsPerLine: overrides.maxCharsPerLine ?? metrics.maxCharsPerLine,
+    readingSpeedCps: overrides.readingSpeedCps ?? metrics.readingSpeedCps,
   };
 }
 

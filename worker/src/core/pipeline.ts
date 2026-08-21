@@ -27,7 +27,7 @@ export async function runTranslateJob(
     sourceLang: job.source, targetLang: job.target, sceneChangeSeconds: job.sceneChangeSeconds, caseSensitiveTerms: job.caseSensitiveTerms,
   });
   if (!extracted.success) {
-    return { success: false, resolved_source_lang: job.source, cues: [], approx_splits: [], missing_count: 0, missing_cues: [] };
+    return { success: false, resolved_source_lang: job.source, cues: [], approx_splits: [], missing_count: 0, missing_cues: [], quality_warnings: [] };
   }
 
   const { sourceLang, contextText } = await resolveContext(
@@ -38,7 +38,7 @@ export async function runTranslateJob(
     env, extracted.units, extracted.chapters, extracted.cues, sourceLang, job.target,
     { maxChars, startedAt, onLog, contextText }
   );
-  const merged = await merge(extracted.cues, extracted.units, translations, sourceLang, job.target);
+  const merged = await merge(extracted.cues, extracted.units, translations, sourceLang, job.target, onLog);
 
   return { success: true, resolved_source_lang: resolvedSourceLang, ...merged };
 }
