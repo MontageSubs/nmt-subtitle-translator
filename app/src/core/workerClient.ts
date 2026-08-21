@@ -149,7 +149,6 @@ function computeAnswer(challengeKey: string, nonce: number, text: string, probeB
   return signChallenge(challengeKey, `${nonce}:${probeBitmap}:${text}`);
 }
 
-/** 与 worker/src/protocol.ts 的 canonicalizeCues 逐字节一致，任一方改动需同步对方 */
 function canonicalizeCues(cues: Pick<Cue, "text">[]): string {
   return cues.map((cue) => cue.text).join(CUE_TEXT_SEPARATOR);
 }

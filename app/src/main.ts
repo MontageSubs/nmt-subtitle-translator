@@ -19,8 +19,6 @@ const SCENE_SLIDER_MAX = 120;
 
 const app = document.getElementById("app")!;
 
-// 跨语言切换保留的用户状态：main.ts 采用一次性 innerHTML 渲染的既有架构，
-// 切换 locale 时整体重渲染最简单可靠，但不能丢用户已经做的选择，所以状态提到渲染函数之外。
 interface AppState {
   srtFile: File | null;
   lastCues: Cue[];

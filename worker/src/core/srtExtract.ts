@@ -201,7 +201,7 @@ function hasResidualText(text: string, latinSource: boolean): boolean {
   return Boolean(text.trim());
 }
 
-function escapeRegExp(text: string): string {
+export function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 

@@ -5,11 +5,6 @@ interface SegmenterAdapter {
   registerTerm?(term: string): void;
 }
 
-/**
- * 分词器仅用于译文回填时寻找合法切分点（架构蓝图 §6），不追求形态学精确度。
- * 空格分隔的文字系统（拉丁语系、西里尔字母、韩语 eojeol）已由 bilingualMerge.ts
- * 的空白符回退逻辑覆盖，此处只登记真正需要专用分词器的连写文字系统。
- */
 async function loadZhAdapter(): Promise<SegmenterAdapter | null> {
   try {
     const { Segment, useDefault } = await import("segmentit");

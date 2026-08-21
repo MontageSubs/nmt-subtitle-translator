@@ -69,7 +69,6 @@ const MUSIC_NOTE_PATTERN = new RegExp(`[${MUSIC_NOTE_CHARS}]`);
 const MUSIC_NOTE_LEADING_GAP_PATTERN = new RegExp(`(?<=\\S)([${MUSIC_NOTE_CHARS}])`, "g");
 const MUSIC_NOTE_TRAILING_GAP_PATTERN = new RegExp(`([${MUSIC_NOTE_CHARS}])(?=\\S)`, "g");
 const MUSIC_INTERIOR_NOTE_PATTERN = new RegExp(`(?<!^)[${MUSIC_NOTE_CHARS}](?!$)`, "g");
-const SOURCE_LEADING_TAG_PATTERN = /^(?:<[^>]+>)*\s*/;
 const POSITION_TOP_TAG = "{\\an7}";
 
 function fixMusicSpacing(text: string): string {
@@ -77,9 +76,17 @@ function fixMusicSpacing(text: string): string {
   return text.replace(MUSIC_NOTE_TRAILING_GAP_PATTERN, "$1 ");
 }
 
-function sourceIsMusic(text: string): boolean {
-  const stripped = text.replace(SOURCE_LEADING_TAG_PATTERN, "");
-  return Boolean(stripped) && MUSIC_NOTE_CHARS.includes(stripped[0]);
+function computeCueMusicFlags(units: Unit[]): Map<number, boolean> {
+  const kindsByCue = new Map<number, boolean[]>();
+  for (const unit of units) {
+    for (const span of unit.spans) {
+      if (!kindsByCue.has(span.id)) kindsByCue.set(span.id, []);
+      kindsByCue.get(span.id)!.push(span.kind === "music");
+    }
+  }
+  const flags = new Map<number, boolean>();
+  for (const [cueId, kinds] of kindsByCue) flags.set(cueId, kinds.length > 0 && kinds.every(Boolean));
+  return flags;
 }
 
 function formatMusicLine(text: string): string {
@@ -384,15 +391,15 @@ function enforceQuoteClosure(parts: string[], targetLang: string | undefined | n
 }
 
 function splitByFullMarkers(translatedText: string, spans: Span[]): string[] | null {
-  const expectedIds = new Set(spans.map((s) => s.id));
   const chunks = translatedText.split(MARKER_PATTERN);
   if (chunks.length !== 1 + 2 * spans.length || chunks[0].trim()) return null;
   const foundIds: number[] = [];
   for (let i = 1; i < chunks.length; i += 2) foundIds.push(Number(chunks[i]));
-  if (new Set(foundIds).size !== expectedIds.size || foundIds.some((id) => !expectedIds.has(id)) || new Set(foundIds).size !== foundIds.length) return null;
-  const byId = new Map<number, string>();
-  for (let i = 0; i < foundIds.length; i++) byId.set(foundIds[i], chunks[2 + i * 2].trim());
-  return spans.map((span) => byId.get(span.id)!);
+  const expectedIds = spans.map((s) => s.id);
+  if (foundIds.length !== expectedIds.length || foundIds.some((id, i) => id !== expectedIds[i])) return null;
+  const parts: string[] = [];
+  for (let i = 2; i < chunks.length; i += 2) parts.push(chunks[i].trim());
+  return parts;
 }
 
 function splitByMarkers(
@@ -497,7 +504,7 @@ async function buildBilingualCues(
   const approxSplits: ApproxSplit[] = [];
   const glossaryTerms = collectGlossaryTerms(units);
   const dashStyle = determineDashStyle(cues);
-  const cueTextById = new Map(cues.map((c) => [c.id, c.text]));
+  const cueAllMusic = computeCueMusicFlags(units);
 
   await registerGlossaryTerms(glossaryTerms, targetLang);
 
@@ -521,7 +528,7 @@ async function buildBilingualCues(
     }
     spans.forEach((span, i) => {
       let part = normalizeTranslation(parts[i], targetLang);
-      if (span.kind === "music" && !sourceIsMusic(cueTextById.get(span.id) || "")) part = formatMusicLine(part);
+      if (span.kind === "music" && !cueAllMusic.get(span.id)) part = formatMusicLine(part);
       push(span.id, [span.dash_index || 0, part]);
     });
   }
@@ -541,7 +548,7 @@ async function buildBilingualCues(
     if (translation) {
       translation = translation.replace(DASH_REPLACE_PATTERN, `$1${dashStyle}`);
       translation = normalizeExclaimQuestion(translation);
-      if (sourceIsMusic(cue.text)) {
+      if (cueAllMusic.get(cue.id)) {
         translation = isChineseTarget(targetLang) ? POSITION_TOP_TAG + formatMusicLine(translation) : formatMusicLine(translation);
       } else {
         translation = restoreQuoteMarkers(translation, targetLang);

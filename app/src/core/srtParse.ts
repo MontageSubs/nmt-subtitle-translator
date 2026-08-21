@@ -10,10 +10,6 @@ function timeToMs(value: string): number {
   return ((Number(hh) * 60 + Number(mm)) * 60 + Number(ss)) * 1000 + Number(ms);
 }
 
-/**
- * 只做"文件容器语法 → 结构化 cue"的机械转换：不剥离行内样式标签，
- * 不做 SDH/术语等语义判断——那些是服务端职责（架构蓝图 §2）。
- */
 function normalizeText(raw: string): { position?: string; text: string } {
   const stripped = raw.replace(/^\uFEFF/, "");
   const match = POSITION_PATTERN.exec(stripped);

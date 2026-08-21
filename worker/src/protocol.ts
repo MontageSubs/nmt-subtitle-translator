@@ -1,10 +1,3 @@
-/**
- * NMT 字幕翻译服务 —— 前端 ↔ Worker 线上格式契约（架构蓝图 §2/§3/§5）
- *
- * Worker 不理解任何字幕文件语法，只消费结构化 cue；本文件是唯一的协议真源，
- * handler/pipeline 均从此处取类型，不得各自定义平行的请求体形状。
- */
-
 export interface ProtocolCue {
   id: number;
   start_ms: number;

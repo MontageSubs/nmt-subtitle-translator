@@ -3,6 +3,7 @@ import { fanOutTranslations, fetchUpstreamTranslation, createLangResolver, LangR
 import { Unit, Chapter, Cue } from "./types";
 import { languageProfile } from "./languageProfiles";
 import { coreLog } from "./log";
+import { escapeRegExp } from "./srtExtract";
 
 const GROUP_MARKER_PATTERN = /\u27e6g([^\u27e6\u27e7]+)\u27e7/g;
 const groupMarker = (id: number | string) => `\u27e6g${id}\u27e7`;
@@ -88,11 +89,6 @@ export interface ContextResolution {
   contextText: string | undefined;
 }
 
-/**
- * 保证正式翻译发出的上下文永远与字幕原文语言一致：本地识别到语言不符时，前端仍然发送内容，
- * 只是打上 needsTranslation 标记，交由这里统一在服务端完成转换——避免"先要知道字幕语言，
- * 才能判断上下文该不该翻译；但字幕语言又要靠翻译过程本身才能确定"的先有鸡还是先有蛋问题。
- */
 export async function resolveContext(
   env: Env, contextText: string | undefined, needsTranslation: boolean | undefined,
   sourceLang: string, targetLang: string, cues: Cue[], maxChars: number, startedAt: number, onLog?: (message: string) => void
@@ -367,17 +363,13 @@ function activateNoTranslateSpans(html: string): string {
   return html.replace(NO_TRANSLATE_SENTINEL_PATTERN, '<span translate="no">$1</span>');
 }
 
-function escapeRegExpLiteral(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function applyTermSubstitution(translated: string, groups: TermGroup[], collapseSurroundingWhitespace: boolean): string {
   let result = translated;
   for (const g of groups) {
     if (!result.includes(g.literal)) continue;
     const pattern = collapseSurroundingWhitespace
-      ? new RegExp(`\\s*${escapeRegExpLiteral(g.literal)}\\s*`)
-      : new RegExp(escapeRegExpLiteral(g.literal));
+      ? new RegExp(`\\s*${escapeRegExp(g.literal)}\\s*`)
+      : new RegExp(escapeRegExp(g.literal));
     result = result.replace(pattern, g.replacement);
   }
   return result;
