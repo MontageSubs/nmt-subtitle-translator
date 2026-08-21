@@ -11,6 +11,10 @@ import { CONTEXT_MAX_CHARS, validateContext } from "./core/context";
 import { loadBundledDictionary, entriesToGlossary, DictionaryEntry } from "./core/dictionary";
 import { mountGlossaryEditor } from "./components/glossaryEditor";
 import { openPreviewModal, PreviewCard } from "./components/previewModal";
+import { openHistoryPanel } from "./components/historyPanel";
+import { showUpdateToast, showOfflineReadyToast } from "./components/updateToast";
+import { initServiceWorker } from "./core/swUpdate";
+import { saveHistoryEntry } from "./core/history";
 import { readStatsCache, writeStatsCache } from "./core/statsCache";
 import { t, getLocale, setLocale, onLocaleChange, LocaleCode } from "./i18n";
 
@@ -67,9 +71,10 @@ function renderApp() {
   app.innerHTML = `
     <main class="shell">
       <header class="shell__header">
-        <div class="locale-switch">
+        <div class="shell__header-actions">
           <button type="button" class="secondary" data-locale="zh">中文</button>
           <button type="button" class="secondary" data-locale="en">EN</button>
+          <button type="button" class="secondary" id="history-button">${t("history.button")}</button>
         </div>
         <h1>${t("app.title")}</h1>
         <p class="brand-tag">${t("app.tagline")}</p>
@@ -338,6 +343,7 @@ function wireApp() {
   }
 
   subtitleInput.addEventListener("change", () => { if (subtitleInput.files?.[0]) handleFile(subtitleInput.files[0]); });
+  (document.getElementById("history-button") as HTMLButtonElement).addEventListener("click", () => openHistoryPanel());
   ["dragover", "dragenter"].forEach((evt) => dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.add("dropzone--active"); }));
   ["dragleave", "drop"].forEach((evt) => dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.remove("dropzone--active"); }));
   dropzone.addEventListener("drop", (e) => {
@@ -413,6 +419,15 @@ function wireApp() {
       downloadLink.href = url;
       downloadLink.download = withExtension(state.subtitleFile.name, state.lastFormat, targetLang);
 
+      saveHistoryEntry({
+        filename: downloadLink.download,
+        sourceLang: job.resolved_source_lang,
+        targetLang,
+        format: state.lastFormat,
+        cueCount: job.cues.length,
+        content: rendered,
+      }).catch(() => {});
+
       resultSummary.textContent = t("result.summary", {
         cues: job.cues.length, missing: job.missing_count, splits: job.approx_splits.length, skipped: job.missing_cues.length,
         warnings: job.quality_warnings.length,
@@ -429,8 +444,11 @@ function wireApp() {
 
   previewButton.addEventListener("click", () => {
     if (!state.lastJobResult) return;
+    const missingSet = new Set(state.lastJobResult.missing_cues);
+    const warningSet = new Set(state.lastJobResult.quality_warnings.map((w) => w.cue_id));
     const cards: PreviewCard[] = state.lastJobResult.cues.map((c) => ({
       id: c.id, start: msToSrtTime(c.start_ms), end: msToSrtTime(c.end_ms), source: c.text, target: c.translation || t("preview.missing"),
+      missing: missingSet.has(c.id), warning: warningSet.has(c.id),
     }));
     const originalById = new Map(state.lastCues.map((c) => [c.id, c]));
     openPreviewModal(renderSubtitle(state.lastFormat, state.lastJobResult.cues, originalById, state.lastRenderMode, state.lastStacking), cards);
@@ -439,3 +457,4 @@ function wireApp() {
 
 onLocaleChange(() => renderApp());
 renderApp();
+initServiceWorker({ onNeedRefresh: showUpdateToast, onOfflineReady: showOfflineReadyToast });

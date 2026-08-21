@@ -29,7 +29,8 @@ export default defineConfig(({ mode }) => ({
   plugins: [
     ...(mode === "production" ? [obfuscateEnvProbe()] : []),
     VitePWA({
-      registerType: "autoUpdate",
+      registerType: "prompt",
+      injectRegister: false,
       includeAssets: ["favicon.svg", "icons/icon-192.png", "icons/icon-512.png"],
       manifest: {
         name: "NMT Subtitle Translator",

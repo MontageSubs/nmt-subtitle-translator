@@ -6,6 +6,8 @@ export interface PreviewCard {
   end: string;
   source: string;
   target: string;
+  missing?: boolean;
+  warning?: boolean;
 }
 
 const CARD_BASE_HEIGHT = 58;
@@ -23,14 +25,28 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function renderVirtualCards(scrollHost: HTMLElement, cards: PreviewCard[]): void {
-  const heights = cards.map(estimateCardHeight);
-  const offsets: number[] = [0];
-  for (const h of heights) offsets.push(offsets[offsets.length - 1] + h);
-  const totalHeight = offsets[offsets.length - 1];
+function cardClass(card: PreviewCard): string {
+  if (card.missing) return " preview-card--missing";
+  if (card.warning) return " preview-card--warning";
+  return "";
+}
 
-  scrollHost.innerHTML = `<div class="preview-cards"><div class="preview-cards__spacer" style="height:${totalHeight}px"></div></div>`;
-  const spacer = scrollHost.querySelector<HTMLElement>(".preview-cards__spacer")!;
+interface CardsView {
+  setFilter(query: string): number;
+  scrollToId(id: number): void;
+}
+
+function createCardsView(scrollHost: HTMLElement, allCards: PreviewCard[]): CardsView {
+  let cards = allCards;
+  let offsets: number[] = [0];
+  let spacer: HTMLElement;
+
+  function rebuildLayout(): void {
+    offsets = [0];
+    for (const card of cards) offsets.push(offsets[offsets.length - 1] + estimateCardHeight(card));
+    scrollHost.innerHTML = `<div class="preview-cards"><div class="preview-cards__spacer" style="height:${offsets[offsets.length - 1]}px"></div></div>`;
+    spacer = scrollHost.querySelector<HTMLElement>(".preview-cards__spacer")!;
+  }
 
   function findIndexAtOffset(target: number): number {
     let lo = 0, hi = offsets.length - 1;
@@ -41,7 +57,7 @@ function renderVirtualCards(scrollHost: HTMLElement, cards: PreviewCard[]): void
     return lo;
   }
 
-  function renderWindow() {
+  function renderWindow(): void {
     const viewTop = scrollHost.scrollTop - RENDER_BUFFER_PX;
     const viewBottom = scrollHost.scrollTop + scrollHost.clientHeight + RENDER_BUFFER_PX;
     const startIndex = findIndexAtOffset(Math.max(0, viewTop));
@@ -50,7 +66,7 @@ function renderVirtualCards(scrollHost: HTMLElement, cards: PreviewCard[]): void
     let html = "";
     for (let i = startIndex; i < endIndex; i++) {
       const c = cards[i];
-      html += `<div class="preview-card" style="top:${offsets[i]}px">
+      html += `<div class="preview-card${cardClass(c)}" style="top:${offsets[i]}px">
         <div class="preview-card__id">#${c.id} · ${c.start} → ${c.end}</div>
         <div class="preview-card__src">${escapeHtml(c.source)}</div>
         <div class="preview-card__dst">${escapeHtml(c.target)}</div>
@@ -59,8 +75,34 @@ function renderVirtualCards(scrollHost: HTMLElement, cards: PreviewCard[]): void
     spacer.innerHTML = html;
   }
 
+  rebuildLayout();
   scrollHost.addEventListener("scroll", renderWindow, { passive: true });
   renderWindow();
+
+  return {
+    setFilter(query: string): number {
+      const trimmed = query.trim();
+      const idMatch = /^#(\d+)$/.exec(trimmed);
+      if (!trimmed) cards = allCards;
+      else if (idMatch) cards = allCards.filter((c) => c.id === Number(idMatch[1]));
+      else {
+        const needle = trimmed.toLowerCase();
+        cards = allCards.filter((c) => c.source.toLowerCase().includes(needle) || c.target.toLowerCase().includes(needle));
+      }
+      rebuildLayout();
+      scrollHost.scrollTop = 0;
+      renderWindow();
+      return cards.length;
+    },
+    scrollToId(id: number): void {
+      const index = allCards.findIndex((c) => c.id === id);
+      if (index === -1) return;
+      cards = allCards;
+      rebuildLayout();
+      renderWindow();
+      scrollHost.scrollTop = Math.max(0, offsets[index] - 20);
+    },
+  };
 }
 
 export interface PreviewModalHandle {
@@ -68,20 +110,28 @@ export interface PreviewModalHandle {
 }
 
 export function openPreviewModal(rawSrt: string, cards: PreviewCard[]): PreviewModalHandle {
+  const problemCards = cards.filter((c) => c.missing || c.warning);
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
     <div class="modal">
       <div class="modal__head">
         <div class="modal__tabs">
-          <button type="button" class="modal__tab modal__tab--active" data-tab="raw">${t("preview.tabRaw")}</button>
-          <button type="button" class="modal__tab" data-tab="cards">${t("preview.tabCards")}</button>
+          <button type="button" class="modal__tab modal__tab--active" data-tab="cards">${t("preview.tabCards")}</button>
+          <button type="button" class="modal__tab" data-tab="raw">${t("preview.tabRaw")}</button>
         </div>
         <button type="button" class="modal__close" aria-label="${t("preview.close")}">✕</button>
       </div>
       <div class="modal__body">
-        <pre class="preview-raw"></pre>
-        <div class="preview-cards-host" style="height:60vh; overflow-y:auto; display:none"></div>
+        <pre class="preview-raw" style="display:none"></pre>
+        <div class="preview-cards-pane">
+          <div class="preview-toolbar">
+            <input type="search" class="preview-search" placeholder="${t("preview.searchPlaceholder")}" />
+            <span class="preview-match-count"></span>
+          </div>
+          <div class="preview-problem-list" style="display:${problemCards.length ? "flex" : "none"}"></div>
+          <div class="preview-cards-host" style="height:56vh; overflow-y:auto"></div>
+        </div>
       </div>
     </div>
   `;
@@ -90,8 +140,31 @@ export function openPreviewModal(rawSrt: string, cards: PreviewCard[]): PreviewM
 
   const rawPre = backdrop.querySelector<HTMLElement>(".preview-raw")!;
   rawPre.textContent = rawSrt;
+  const cardsPane = backdrop.querySelector<HTMLElement>(".preview-cards-pane")!;
   const cardsHost = backdrop.querySelector<HTMLElement>(".preview-cards-host")!;
-  let cardsRendered = false;
+  const searchInput = backdrop.querySelector<HTMLInputElement>(".preview-search")!;
+  const matchCount = backdrop.querySelector<HTMLElement>(".preview-match-count")!;
+  const problemList = backdrop.querySelector<HTMLElement>(".preview-problem-list")!;
+
+  const view = createCardsView(cardsHost, cards);
+
+  problemList.innerHTML = problemCards.map((c) => `
+    <button type="button" class="preview-problem-chip${c.missing ? " preview-problem-chip--missing" : ""}" data-jump="${c.id}">
+      ${c.missing ? "✕" : "⚠"} #${c.id}
+    </button>`).join("");
+  problemList.querySelectorAll<HTMLButtonElement>("[data-jump]").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      searchInput.value = "";
+      matchCount.textContent = "";
+      view.scrollToId(Number(chip.dataset.jump));
+    });
+  });
+
+  searchInput.addEventListener("input", () => {
+    const total = cards.length;
+    const matched = view.setFilter(searchInput.value);
+    matchCount.textContent = searchInput.value.trim() ? t("preview.matchCount", { matched, total }) : "";
+  });
 
   function close() {
     document.body.style.overflow = "";
@@ -103,15 +176,11 @@ export function openPreviewModal(rawSrt: string, cards: PreviewCard[]): PreviewM
 
   backdrop.querySelectorAll<HTMLButtonElement>(".modal__tab").forEach((tab) => {
     tab.addEventListener("click", () => {
-      backdrop.querySelectorAll(".modal__tab").forEach((t) => t.classList.remove("modal__tab--active"));
+      backdrop.querySelectorAll(".modal__tab").forEach((el) => el.classList.remove("modal__tab--active"));
       tab.classList.add("modal__tab--active");
       const isCards = tab.dataset.tab === "cards";
       rawPre.style.display = isCards ? "none" : "block";
-      cardsHost.style.display = isCards ? "block" : "none";
-      if (isCards && !cardsRendered) {
-        renderVirtualCards(cardsHost, cards);
-        cardsRendered = true;
-      }
+      cardsPane.style.display = isCards ? "flex" : "none";
     });
   });
 
