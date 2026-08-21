@@ -1,8 +1,9 @@
 import "./style.css";
-import { DEFAULT_SCENE_CHANGE_SECONDS, previewChapterCount, parseSrt } from "./core/srtParse";
-import { renderSrt, msToSrtTime } from "./core/srtRender";
+import { DEFAULT_SCENE_CHANGE_SECONDS, previewChapterCount } from "./core/srtParse";
+import { msToSrtTime } from "./core/srtRender";
+import { detectFormat, parseSubtitle, renderSubtitle, withExtension, ACCEPTED_EXTENSIONS } from "./core/subtitleFormat";
 import { SOURCE_LANGUAGES, TARGET_LANGUAGES, AUTO_DETECT_CODE, defaultOutputMode, languageProfile } from "./core/languageProfiles";
-import { Cue, OutputMode, BilingualStacking } from "./core/types";
+import { Cue, OutputMode, BilingualStacking, SubtitleFormat } from "./core/types";
 import { handshake, completeTranslateJob, TranslateJobResponse } from "./core/workerClient";
 import { applySdhStripping } from "./core/sdh";
 import { detectSourceLanguage, isKnownSourceLanguage } from "./core/detect";
@@ -10,6 +11,7 @@ import { CONTEXT_MAX_CHARS, validateContext } from "./core/context";
 import { loadBundledDictionary, entriesToGlossary, DictionaryEntry } from "./core/dictionary";
 import { mountGlossaryEditor } from "./components/glossaryEditor";
 import { openPreviewModal, PreviewCard } from "./components/previewModal";
+import { readStatsCache, writeStatsCache } from "./core/statsCache";
 import { t, getLocale, setLocale, onLocaleChange, LocaleCode } from "./i18n";
 
 const SCENE_SECONDS_MIN = 1;
@@ -20,11 +22,12 @@ const SCENE_SLIDER_MAX = 120;
 const app = document.getElementById("app")!;
 
 interface AppState {
-  srtFile: File | null;
+  subtitleFile: File | null;
   lastCues: Cue[];
   lastJobResult: TranslateJobResponse | null;
   lastRenderMode: OutputMode;
   lastStacking: BilingualStacking;
+  lastFormat: SubtitleFormat;
   sourceLang: string;
   targetLang: string;
   outputMode: OutputMode;
@@ -38,11 +41,12 @@ interface AppState {
 }
 
 const state: AppState = {
-  srtFile: null,
+  subtitleFile: null,
   lastCues: [],
   lastJobResult: null,
   lastRenderMode: "monolingual",
   lastStacking: "translation_top",
+  lastFormat: "srt",
   sourceLang: AUTO_DETECT_CODE,
   targetLang: "zh",
   outputMode: "monolingual",
@@ -80,11 +84,11 @@ function renderApp() {
           <div class="dropzone__title">${t("dropzone.title")}</div>
           <div class="dropzone__hint">${t("dropzone.hint")}</div>
           <div class="dropzone__file" id="dropzone-file"></div>
-          <input type="file" id="srt-file" accept=".srt" />
+          <input type="file" id="subtitle-file" accept="${ACCEPTED_EXTENSIONS.join(",")}" />
         </label>
       </section>
 
-      <section class="step" id="lang-step" ${state.srtFile ? "" : "hidden"}>
+      <section class="step" id="lang-step" ${state.subtitleFile ? "" : "hidden"}>
         <div class="step__head"><span class="step__num">2</span><span class="step__title">${t("step.lang.title")}</span></div>
         <div class="field-row">
           <label class="field">
@@ -114,7 +118,7 @@ function renderApp() {
         <div id="glossary-editor"></div>
       </section>
 
-      <section class="step" id="options-step" ${state.srtFile ? "" : "hidden"}>
+      <section class="step" id="options-step" ${state.subtitleFile ? "" : "hidden"}>
         <div class="step__head"><span class="step__num">3</span><span class="step__title">${t("step.options.title")}</span></div>
         <div class="toggle-row">
           <div>
@@ -146,7 +150,7 @@ function renderApp() {
         </label>
       </section>
 
-      <section class="step" id="start-step" ${state.srtFile ? "" : "hidden"}>
+      <section class="step" id="start-step" ${state.subtitleFile ? "" : "hidden"}>
         <button id="start" class="primary">${t("start.button")}</button>
       </section>
 
@@ -192,7 +196,7 @@ function wireApp() {
 
   const dropzone = document.getElementById("dropzone") as HTMLElement;
   const dropzoneFile = document.getElementById("dropzone-file") as HTMLElement;
-  const srtInput = document.getElementById("srt-file") as HTMLInputElement;
+  const subtitleInput = document.getElementById("subtitle-file") as HTMLInputElement;
   const langStep = document.getElementById("lang-step") as HTMLElement;
   const optionsStep = document.getElementById("options-step") as HTMLElement;
   const startStep = document.getElementById("start-step") as HTMLElement;
@@ -229,7 +233,7 @@ function wireApp() {
   outputModeSelect.value = state.outputMode;
   stackingSelect.value = state.stackingOrder;
   contextInput.value = state.contextText;
-  if (state.srtFile) dropzoneFile.textContent = t("dropzone.selected", { name: state.srtFile.name });
+  if (state.subtitleFile) dropzoneFile.textContent = t("dropzone.selected", { name: state.subtitleFile.name });
 
   const glossaryHandle = mountGlossaryEditor(glossaryEditorContainer, state.glossaryEntries);
 
@@ -262,7 +266,7 @@ function wireApp() {
   sourceSelect.addEventListener("change", () => {
     state.sourceLang = sourceSelect.value;
     updateOutputModeVisibility();
-    detectHint.textContent = sourceSelect.value === AUTO_DETECT_CODE && state.srtFile ? t("detect.auto") : "";
+    detectHint.textContent = sourceSelect.value === AUTO_DETECT_CODE && state.subtitleFile ? t("detect.auto") : "";
     detectHint.classList.remove("detect-hint--done");
     if (sourceSelect.value !== AUTO_DETECT_CODE) loadDictionaryFor(sourceSelect.value);
   });
@@ -307,14 +311,14 @@ function wireApp() {
   }
 
   async function handleFile(file: File) {
-    state.srtFile = file;
+    state.subtitleFile = file;
     const content = await file.text();
     dropzoneFile.textContent = t("dropzone.selected", { name: file.name });
     langStep.hidden = false;
     optionsStep.hidden = false;
     startStep.hidden = false;
 
-    state.lastCues = parseSrt(content);
+    state.lastCues = parseSubtitle(detectFormat(file.name), content);
     updateScenePreview();
 
     if (sourceSelect.value === AUTO_DETECT_CODE) {
@@ -333,7 +337,7 @@ function wireApp() {
     }
   }
 
-  srtInput.addEventListener("change", () => { if (srtInput.files?.[0]) handleFile(srtInput.files[0]); });
+  subtitleInput.addEventListener("change", () => { if (subtitleInput.files?.[0]) handleFile(subtitleInput.files[0]); });
   ["dragover", "dragenter"].forEach((evt) => dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.add("dropzone--active"); }));
   ["dragleave", "drop"].forEach((evt) => dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.remove("dropzone--active"); }));
   dropzone.addEventListener("drop", (e) => {
@@ -341,12 +345,14 @@ function wireApp() {
     if (file) handleFile(file);
   });
 
+  const cachedStats = readStatsCache();
+  if (cachedStats) statsLine.textContent = t("stats.line", { ...cachedStats });
   handshake()
-    .then(({ total, last24h }) => { statsLine.textContent = t("stats.line", { total, last24h }); })
-    .catch(() => { statsLine.textContent = ""; });
+    .then((stats) => { statsLine.textContent = t("stats.line", { ...stats }); writeStatsCache(stats); })
+    .catch(() => { if (!cachedStats) statsLine.textContent = ""; });
 
   startButton.addEventListener("click", async () => {
-    if (!state.srtFile) return;
+    if (!state.subtitleFile) return;
 
     startButton.disabled = true;
     progressCard.hidden = false;
@@ -387,6 +393,7 @@ function wireApp() {
       state.lastJobResult = job;
       state.lastRenderMode = outputMode;
       state.lastStacking = state.stackingOrder;
+      state.lastFormat = detectFormat(state.subtitleFile.name);
 
       if (sourceLang === AUTO_DETECT_CODE) {
         const known = SOURCE_LANGUAGES.some((l) => l.code === job.resolved_source_lang.split("-")[0]);
@@ -399,12 +406,12 @@ function wireApp() {
       progressBar.value = 100;
       progressLabel.textContent = t("progress.merging");
       const originalById = new Map(state.lastCues.map((c) => [c.id, c]));
-      const srt = renderSrt(job.cues, originalById, outputMode, state.stackingOrder);
+      const rendered = renderSubtitle(state.lastFormat, job.cues, originalById, outputMode, state.stackingOrder);
 
-      const blob = new Blob([srt], { type: "text/plain;charset=utf-8" });
+      const blob = new Blob([rendered], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       downloadLink.href = url;
-      downloadLink.download = state.srtFile.name.replace(/\.srt$/i, `.${targetLang}.srt`);
+      downloadLink.download = withExtension(state.subtitleFile.name, state.lastFormat, targetLang);
 
       resultSummary.textContent = t("result.summary", {
         cues: job.cues.length, missing: job.missing_count, splits: job.approx_splits.length, skipped: job.missing_cues.length,
@@ -426,7 +433,7 @@ function wireApp() {
       id: c.id, start: msToSrtTime(c.start_ms), end: msToSrtTime(c.end_ms), source: c.text, target: c.translation || t("preview.missing"),
     }));
     const originalById = new Map(state.lastCues.map((c) => [c.id, c]));
-    openPreviewModal(renderSrt(state.lastJobResult.cues, originalById, state.lastRenderMode, state.lastStacking), cards);
+    openPreviewModal(renderSubtitle(state.lastFormat, state.lastJobResult.cues, originalById, state.lastRenderMode, state.lastStacking), cards);
   });
 }
 

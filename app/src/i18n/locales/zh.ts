@@ -5,7 +5,7 @@ export const zh = {
 
   "step.upload.title": "上传字幕文件",
   "dropzone.title": "拖拽 .srt 文件到此处，或点击选择",
-  "dropzone.hint": "仅支持标准 SRT 字幕文件",
+  "dropzone.hint": "支持标准 SRT 或 WebVTT 字幕文件",
   "dropzone.selected": "已选择：{name}",
 
   "step.lang.title": "语言与术语表",
@@ -48,7 +48,7 @@ export const zh = {
   "preview.button": "下载前预览",
   "download.button": "下载字幕",
   "result.summary": "完成：共 {cues} 条字幕，缺失翻译 {missing} 条，近似拆分 {splits} 处，跳过 {skipped} 个单元，{warnings} 条阅读速度提示（详情见上方日志）。",
-  "error.parseFailed": "未能从文件中解析出任何字幕块，请确认文件是标准 SRT 格式。",
+  "error.parseFailed": "未能从文件中解析出任何字幕块，请确认文件是标准 SRT 或 WebVTT 格式。",
   "error.prefix": "错误：{message}",
   "captcha.text": "需要完成一次人机验证才能继续翻译",
   "stats.line": "累计翻译 {total} 条字幕 · 近 24 小时 {last24h} 条",

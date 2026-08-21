@@ -7,7 +7,7 @@ export const en: Record<keyof typeof zh, string> = {
 
   "step.upload.title": "Upload a subtitle file",
   "dropzone.title": "Drag an .srt file here, or click to choose",
-  "dropzone.hint": "Standard SRT subtitle files only",
+  "dropzone.hint": "Standard SRT or WebVTT subtitle files",
   "dropzone.selected": "Selected: {name}",
 
   "step.lang.title": "Language & Glossary",
@@ -50,7 +50,7 @@ export const en: Record<keyof typeof zh, string> = {
   "preview.button": "Preview before download",
   "download.button": "Download subtitles",
   "result.summary": "Done: {cues} cues total, {missing} missing translations, {splits} approximate splits, {skipped} units skipped, {warnings} reading-speed warnings (see log above for details).",
-  "error.parseFailed": "No subtitle blocks could be parsed from this file — please confirm it is a standard SRT file.",
+  "error.parseFailed": "No subtitle blocks could be parsed from this file — please confirm it is a standard SRT or WebVTT file.",
   "error.prefix": "Error: {message}",
   "captcha.text": "A human verification check is required to continue",
   "stats.line": "{total} cues translated in total · {last24h} in the last 24h",

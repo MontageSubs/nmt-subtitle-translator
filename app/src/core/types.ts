@@ -4,7 +4,10 @@ export interface Cue {
   end_ms: number;
   text: string;
   position?: string;
+  cueSettings?: string;
 }
+
+export type SubtitleFormat = "srt" | "vtt";
 
 export type OutputMode = "bilingual" | "monolingual";
 export type BilingualStacking = "translation_top" | "original_top";
