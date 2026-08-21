@@ -180,20 +180,11 @@ function resolveAnchorCuts(text: string, boundaryTypes: (BoundaryName | null)[],
   const anchors = new Map<number, number>();
   for (const [boundary, indices] of indicesByType) {
     const candidates = [...text.matchAll(BOUNDARY_SEARCH_PATTERNS[boundary])]
-      .map((m) => m.index! + m[0].length)
-      .filter((end) => !insideProtectedSpan(end, protectedSpans) && !isLeadingPunctRun(text, matchStartFor(text, BOUNDARY_SEARCH_PATTERNS[boundary], end)));
+      .filter((m) => !insideProtectedSpan(m.index! + m[0].length, protectedSpans) && !isLeadingPunctRun(text, m.index!))
+      .map((m) => m.index! + m[0].length);
     if (candidates.length === indices.length) indices.forEach((idx, i) => anchors.set(idx, candidates[i]));
   }
   return anchors;
-}
-
-function matchStartFor(text: string, pattern: RegExp, end: number): number {
-  pattern.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = pattern.exec(text))) {
-    if (m.index + m[0].length === end) return m.index;
-  }
-  return end;
 }
 
 const CLOSING_TAIL_CHARS = "'\"”’)\\]}》」』】〕＞〉»›";
