@@ -179,7 +179,8 @@ function countBoundaryOccurrences(text: string, boundary: BoundaryName): number 
   const pattern = BOUNDARY_SEARCH_PATTERNS[boundary];
   pattern.lastIndex = 0;
   let count = 0;
-  while (pattern.exec(text)) count++;
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(text))) if (m.index > 0) count++;
   return count;
 }
 
