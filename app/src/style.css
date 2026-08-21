@@ -77,6 +77,19 @@ body {
 .field-row { display: flex; gap: 16px; flex-wrap: wrap; }
 .field-row .field { flex: 1; min-width: 160px; }
 
+.field-divider {
+  font-weight: 600; font-size: 0.85rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em;
+  margin: 22px 0 14px; padding-top: 14px; border-top: 1px solid var(--line);
+}
+
+.segmented { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; align-self: flex-start; }
+.segmented__option {
+  background: none; border: none; border-inline-start: 1px solid var(--line); padding: 7px 14px; font-size: 0.85rem;
+  color: var(--muted); cursor: pointer;
+}
+.segmented__option:first-child { border-inline-start: none; }
+.segmented__option--active { background: var(--accent); color: var(--accent-ink); }
+
 select, input[type="text"], input[type="number"], textarea {
   background: var(--paper);
   color: var(--ink);

@@ -10,6 +10,7 @@ import { detectSourceLanguage, isKnownSourceLanguage } from "./core/detect";
 import { CONTEXT_MAX_CHARS, validateContext } from "./core/context";
 import { loadBundledDictionary, entriesToGlossary, DictionaryEntry } from "./core/dictionary";
 import { mountGlossaryEditor } from "./components/glossaryEditor";
+import { mountSegmented } from "./components/segmented";
 import { openPreviewModal, PreviewCard } from "./components/previewModal";
 import { openHistoryPanel } from "./components/historyPanel";
 import { showUpdateToast, showOfflineReadyToast } from "./components/updateToast";
@@ -106,25 +107,19 @@ function renderApp() {
             <select id="target-lang"></select>
           </label>
         </div>
-        <label class="field" id="output-mode-field" ${state.targetLang === "zh" ? "" : "hidden"}>
-          <span>${t("field.outputMode")}</span>
-          <select id="output-mode">
-            <option value="bilingual">${t("outputMode.bilingual")}</option>
-            <option value="monolingual">${t("outputMode.monolingual")}</option>
-          </select>
-        </label>
-        <label class="field" id="stacking-field" ${state.targetLang === "zh" && state.outputMode === "bilingual" ? "" : "hidden"}>
-          <span>${t("field.stacking")}</span>
-          <select id="stacking-order">
-            <option value="translation_top">${t("stacking.translationTop")}</option>
-            <option value="original_top">${t("stacking.originalTop")}</option>
-          </select>
-        </label>
+        <div class="field-row">
+          <div class="field" id="output-mode-field" ${state.targetLang === "zh" ? "" : "hidden"}>
+            <span>${t("field.outputMode")}</span>
+            <div class="segmented" id="output-mode" role="group" aria-label="${t("field.outputMode")}"></div>
+          </div>
+          <div class="field" id="stacking-field" ${state.targetLang === "zh" && state.outputMode === "bilingual" ? "" : "hidden"}>
+            <span>${t("field.stacking")}</span>
+            <div class="segmented" id="stacking-order" role="group" aria-label="${t("field.stacking")}"></div>
+          </div>
+        </div>
         <div id="glossary-editor"></div>
-      </section>
 
-      <section class="step" id="options-step" ${state.subtitleFile ? "" : "hidden"}>
-        <div class="step__head"><span class="step__num">3</span><span class="step__title">${t("step.options.title")}</span></div>
+        <div class="field-divider">${t("step.options.title")}</div>
         <div class="toggle-row">
           <div>
             <div class="toggle-row__label">${t("sdh.label")}</div>
@@ -203,15 +198,14 @@ function wireApp() {
   const dropzoneFile = document.getElementById("dropzone-file") as HTMLElement;
   const subtitleInput = document.getElementById("subtitle-file") as HTMLInputElement;
   const langStep = document.getElementById("lang-step") as HTMLElement;
-  const optionsStep = document.getElementById("options-step") as HTMLElement;
   const startStep = document.getElementById("start-step") as HTMLElement;
   const sourceSelect = document.getElementById("source-lang") as HTMLSelectElement;
   const targetSelect = document.getElementById("target-lang") as HTMLSelectElement;
   const detectHint = document.getElementById("detect-hint") as HTMLElement;
   const outputModeField = document.getElementById("output-mode-field") as HTMLElement;
-  const outputModeSelect = document.getElementById("output-mode") as HTMLSelectElement;
+  const outputModeContainer = document.getElementById("output-mode") as HTMLElement;
   const stackingField = document.getElementById("stacking-field") as HTMLElement;
-  const stackingSelect = document.getElementById("stacking-order") as HTMLSelectElement;
+  const stackingContainer = document.getElementById("stacking-order") as HTMLElement;
   const sdhToggle = document.getElementById("sdh-toggle") as HTMLInputElement;
   const caseSensitiveToggle = document.getElementById("case-sensitive-toggle") as HTMLInputElement;
   const sceneSecondsInput = document.getElementById("scene-seconds") as HTMLInputElement;
@@ -235,8 +229,22 @@ function wireApp() {
 
   fillSelect(sourceSelect, SOURCE_LANGUAGES, state.sourceLang, true);
   fillSelect(targetSelect, TARGET_LANGUAGES, state.targetLang);
-  outputModeSelect.value = state.outputMode;
-  stackingSelect.value = state.stackingOrder;
+  const outputModeSegmented = mountSegmented(
+    outputModeContainer,
+    [{ value: "bilingual", label: t("outputMode.bilingual") }, { value: "monolingual", label: t("outputMode.monolingual") }],
+    state.outputMode,
+    (value) => {
+      state.userPickedOutputMode = true;
+      state.outputMode = value as OutputMode;
+      stackingField.hidden = targetSelect.value !== "zh" || state.outputMode !== "bilingual";
+    }
+  );
+  const stackingSegmented = mountSegmented(
+    stackingContainer,
+    [{ value: "translation_top", label: t("stacking.translationTop") }, { value: "original_top", label: t("stacking.originalTop") }],
+    state.stackingOrder,
+    (value) => { state.stackingOrder = value as BilingualStacking; }
+  );
   contextInput.value = state.contextText;
   if (state.subtitleFile) dropzoneFile.textContent = t("dropzone.selected", { name: state.subtitleFile.name });
 
@@ -254,19 +262,11 @@ function wireApp() {
     outputModeField.hidden = !isZhTarget;
     if (isZhTarget && !state.userPickedOutputMode) {
       state.outputMode = defaultOutputMode(sourceSelect.value === AUTO_DETECT_CODE ? "en" : sourceSelect.value, targetSelect.value);
-      outputModeSelect.value = state.outputMode;
+      outputModeSegmented.setValue(state.outputMode);
     }
     stackingField.hidden = !isZhTarget || state.outputMode !== "bilingual";
   }
 
-  outputModeSelect.addEventListener("change", () => {
-    state.userPickedOutputMode = true;
-    state.outputMode = outputModeSelect.value as OutputMode;
-    stackingField.hidden = targetSelect.value !== "zh" || state.outputMode !== "bilingual";
-  });
-  stackingSelect.addEventListener("change", () => {
-    state.stackingOrder = stackingSelect.value as BilingualStacking;
-  });
   targetSelect.addEventListener("change", () => { state.targetLang = targetSelect.value; updateOutputModeVisibility(); });
   sourceSelect.addEventListener("change", () => {
     state.sourceLang = sourceSelect.value;
@@ -320,7 +320,6 @@ function wireApp() {
     const content = await file.text();
     dropzoneFile.textContent = t("dropzone.selected", { name: file.name });
     langStep.hidden = false;
-    optionsStep.hidden = false;
     startStep.hidden = false;
 
     state.lastCues = parseSubtitle(detectFormat(file.name), content);
@@ -370,7 +369,7 @@ function wireApp() {
     try {
       const sourceLang = sourceSelect.value;
       const targetLang = targetSelect.value;
-      const outputMode = outputModeSelect.value as OutputMode;
+      const outputMode = state.outputMode;
       const sceneChangeSeconds = state.sceneSeconds;
       const stripSdhEnabled = sdhToggle.checked;
 
