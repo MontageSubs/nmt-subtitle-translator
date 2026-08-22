@@ -205,21 +205,71 @@ function buildChapterHtml(group: Item[], indices: Map<string, number>, contextTe
   const spans = group
     .map((item) => {
       const idx = indices.get(item.id)!;
-      return `<span id=${idx}>${NO_TRANSLATE_OPEN}${groupMarker(idx)}${NO_TRANSLATE_CLOSE}${escapeHtml(item.text)}</span>`;
+      return `<span id=${idx}>${groupMarker(idx)}${escapeHtml(item.text)}</span>`;
     })
     .join("");
-  const context = contextText ? `<span>${NO_TRANSLATE_OPEN}${groupMarker("ctx")}${NO_TRANSLATE_CLOSE}${escapeHtml(contextText)}</span>` : "";
+  const context = contextText ? `<span>${groupMarker("ctx")}${escapeHtml(contextText)}</span>` : "";
   return `<div>${context}${spans}</div>`;
+}
+
+function splitByMarker(flatText: string, pattern: RegExp): Map<string, string> {
+  const parts = flatText.split(pattern);
+  const result = new Map<string, string>();
+  const seen = new Set<string>();
+  for (let i = 1; i < parts.length; i += 2) {
+    const key = parts[i];
+    if (seen.has(key)) {
+      result.delete(key);
+      continue;
+    }
+    seen.add(key);
+    const text = (parts[i + 1] || "").trim();
+    if (text) result.set(key, text);
+  }
+  return result;
+}
+
+const SPAN_OPEN_PATTERN = /<span[^>]*\bid=["']?([a-zA-Z0-9:]+)["']?[^>]*>/g;
+
+function parseBySpans(html: string): Map<number, string> {
+  const opens: [number, string][] = [];
+  for (const m of html.matchAll(SPAN_OPEN_PATTERN)) {
+    if (/^\d+$/.test(m[1])) opens.push([m.index! + m[0].length, m[1]]);
+  }
+  const result = new Map<number, string>();
+  opens.forEach(([end, idxStr], i) => {
+    const idx = Number(idxStr);
+    const chunkEnd = i + 1 < opens.length ? opens[i + 1][0] : html.length;
+    const raw = html.slice(end, chunkEnd);
+    const stripped = unescapeHtml(raw.replace(ITALIC_PATTERN, "").replace(TAG_PATTERN, ""));
+    const text = stripped.replace(GROUP_MARKER_PATTERN, "").trim().replace(/\s+/g, " ");
+    if (!text) return;
+    result.set(idx, result.has(idx) ? `${result.get(idx)} ${text}` : text);
+  });
+  return result;
 }
 
 function parseByMarkers(html: string): Map<number, string> {
   const flat = unescapeHtml(html.replace(ITALIC_PATTERN, "").replace(TAG_PATTERN, ""));
-  const parts = flat.split(GROUP_MARKER_PATTERN);
   const result = new Map<number, string>();
-  for (let i = 1; i < parts.length; i += 2) {
-    if (/^\d+$/.test(parts[i])) result.set(Number(parts[i]), (parts[i + 1] || "").trim());
+  for (const [key, text] of splitByMarker(flat, GROUP_MARKER_PATTERN)) {
+    if (/^\d+$/.test(key)) result.set(Number(key), text);
   }
   return result;
+}
+
+const MARKER_OVERREACH_RATIO = 1.3;
+
+function chooseCandidate(spanText: string | undefined, markerText: string | undefined): string | undefined {
+  if (markerText === undefined) return spanText;
+  if (spanText === undefined) return markerText;
+  const spanLen = contentLength(spanText);
+  if (spanLen && contentLength(markerText) / spanLen > MARKER_OVERREACH_RATIO) return spanText;
+  return markerText;
+}
+
+function parseTranslatedHtml(html: string): { spanResult: Map<number, string>; markerResult: Map<number, string> } {
+  return { spanResult: parseBySpans(html), markerResult: parseByMarkers(html) };
 }
 
 async function sendHtml(env: Env, html: string, sourceLang: string, targetLang: string, signal?: AbortSignal, resolver?: LangResolver): Promise<string> {
@@ -237,12 +287,13 @@ function prepareBatch(batch: Item[][], contextText?: string): { items: Item[]; i
 }
 
 function extractTranslations(translatedHtml: string, items: Item[], idByIndex: Map<number, string>): Map<string, string> {
-  const parsed = parseByMarkers(translatedHtml);
+  const { spanResult, markerResult } = parseTranslatedHtml(translatedHtml);
   const sourceById = new Map(items.map((item) => [item.id, item.text]));
   const result = new Map<string, string>();
-  for (const [idx, text] of parsed) {
+  for (const idx of new Set([...spanResult.keys(), ...markerResult.keys()])) {
     const itemId = idByIndex.get(idx);
     if (itemId === undefined) continue;
+    const text = chooseCandidate(spanResult.get(idx), markerResult.get(idx))!;
     if (hasContent(text) || !hasContent(sourceById.get(itemId))) result.set(itemId, text);
   }
   return result;
@@ -449,7 +500,6 @@ async function retryUntranslated(
 interface WindowPlan {
   suspectId: number;
   windowedText: string;
-  expectedIds: number[];
   keepIds: Set<number>;
   window: Unit[];
 }
@@ -460,23 +510,26 @@ function buildWindowPlan(units: Unit[], suspectId: number, batchChars: number): 
   const window = units.slice(Math.max(0, i - WINDOW_CONTEXT_RADIUS), i + WINDOW_CONTEXT_RADIUS + 1);
   if (window.length < 2) return null;
   const pieces = [window[0].text];
-  for (const unit of window.slice(1)) pieces.push(` ${NO_TRANSLATE_OPEN}${UNIT_MARKER_TEMPLATE(unit.id)}${NO_TRANSLATE_CLOSE} `, unit.text);
+  for (const unit of window.slice(1)) pieces.push(` ${UNIT_MARKER_TEMPLATE(unit.id)} `, unit.text);
   const windowedText = pieces.join("");
   if (!withinBudget(windowedText, batchChars)) return null;
-  const expectedIds = window.slice(1).map((u) => u.id);
   const keepIds = new Set(units.slice(Math.max(0, i - WINDOW_KEEP_RADIUS), i + WINDOW_KEEP_RADIUS + 1).map((u) => u.id));
-  return { suspectId, windowedText, expectedIds, keepIds, window };
+  return { suspectId, windowedText, keepIds, window };
 }
 
 function parseWindowResult(response: string | undefined, plan: WindowPlan): Map<number, string> {
   if (response === undefined) return new Map();
-  const foundIds = [...response.matchAll(UNIT_MARKER_PATTERN)].map((m) => Number(m[1]));
-  if (JSON.stringify(foundIds) !== JSON.stringify(plan.expectedIds)) return new Map();
-  const chunks = response.split(UNIT_MARKER_PATTERN).filter((_, idx) => idx % 2 === 0);
+  const unitById = new Map(plan.window.map((u) => [u.id, u]));
+  const lead = response.split(UNIT_MARKER_PATTERN, 1)[0].trim();
+  const chunks = new Map<number, string>();
+  if (lead) chunks.set(plan.window[0].id, lead);
+  for (const [key, text] of splitByMarker(response, UNIT_MARKER_PATTERN)) {
+    if (/^\d+$/.test(key)) chunks.set(Number(key), text);
+  }
   const recovered = new Map<number, string>();
-  plan.window.forEach((unit, idx) => {
-    if (plan.keepIds.has(unit.id)) recovered.set(unit.id, (chunks[idx] || "").trim());
-  });
+  for (const [uid, text] of chunks) {
+    if (plan.keepIds.has(uid) && isLengthPlausible(unitById.get(uid)!.text, text)) recovered.set(uid, text);
+  }
   return recovered;
 }
 
@@ -502,7 +555,16 @@ function expectedCueIds(unit: Unit): number[] {
 function splitCueChunks(text: string | null | undefined): Map<number, string> {
   const parts = (text || "").split(CUE_MARKER_PATTERN);
   const chunks = new Map<number, string>();
-  for (let i = 1; i < parts.length; i += 2) chunks.set(Number(parts[i]), (parts[i + 1] || "").trim());
+  const seen = new Set<number>();
+  for (let i = 1; i < parts.length; i += 2) {
+    const cid = Number(parts[i]);
+    if (seen.has(cid)) {
+      chunks.delete(cid);
+      continue;
+    }
+    seen.add(cid);
+    chunks.set(cid, (parts[i + 1] || "").trim());
+  }
   return chunks;
 }
 
@@ -526,7 +588,7 @@ function patchMissingCues(text: string, expectedIds: number[], recovered: Map<nu
 function buildIsolatedDivs(cueIds: number[], cueTextById: Map<number, string>): string {
   return cueIds
     .filter((cid) => cueTextById.has(cid))
-    .map((cid) => `<div><span translate="no">${CUE_MARKER_TEMPLATE(cid)}</span> ${escapeHtml(cueTextById.get(cid)!)}</div>`)
+    .map((cid) => `<div>${CUE_MARKER_TEMPLATE(cid)} ${escapeHtml(cueTextById.get(cid)!)}</div>`)
     .join("");
 }
 

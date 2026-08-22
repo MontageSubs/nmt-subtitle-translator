@@ -184,6 +184,20 @@ function countBoundaryOccurrences(text: string, boundary: BoundaryName): number 
   return count;
 }
 
+function resolveMarkerAnchors(text: string, spans: Span[]): Map<number, number> {
+  const positions = new Map<number, number>();
+  for (const m of text.matchAll(MARKER_PATTERN)) {
+    const id = Number(m[1]);
+    if (!positions.has(id)) positions.set(id, m.index!);
+  }
+  const anchors = new Map<number, number>();
+  for (let i = 0; i < spans.length - 1; i++) {
+    const next = spans[i + 1];
+    if (next.boundary === "marker" && positions.has(next.id)) anchors.set(i, positions.get(next.id)!);
+  }
+  return anchors;
+}
+
 function resolveAnchorCuts(text: string, spans: Span[], boundaryTypes: (BoundaryName | null)[], protectedSpans: [number, number][]): Map<number, number> {
   const candidatesByType = new Map<BoundaryName, number[]>();
   const consumedByType = new Map<BoundaryName, number>();
@@ -206,14 +220,17 @@ function resolveAnchorCuts(text: string, spans: Span[], boundaryTypes: (Boundary
 }
 
 const CLOSING_TAIL_CHARS = "'\"”’)\\]}》」』】〕＞〉»›";
-const GENERAL_PUNCT_SEARCH_PATTERN = new RegExp(`[，,、；;。.!?！？：:…]+[${CLOSING_TAIL_CHARS}]*`, "g");
+const GENERAL_STRONG_PUNCT_PATTERN = new RegExp(`[，,、；;。.!?！？：:]+[${CLOSING_TAIL_CHARS}]*`, "g");
+const GENERAL_WEAK_PUNCT_PATTERN = new RegExp(`(?:\\.{2,}|—+|…+)[${CLOSING_TAIL_CHARS}]*`, "g");
 const LEFT_CUT_PATTERN = /[“「『（([{＜〈《【〔„‚«‹¿¡]/g;
 const BOOK_TITLE_PATTERN = /《[^《》]*》/g;
 const EMBEDDED_QUOTE_PATTERN = /“[^“”]*”/g;
 const EMBEDDED_QUOTE_MAX_CHARS = 16;
 const ORIGINAL_PUNCT_TOLERANCE: Record<BoundaryName, number> = { trail_off: 0.6, comma: 0.2, period: 0.2, colon: 0.2 };
 const INFERRED_PUNCT_TOLERANCE = 0.15;
-const PUNCT_PROXIMITY_CHARS = 4;
+const INFERRED_WEAK_PUNCT_TOLERANCE = 0.06;
+const PUNCT_PROXIMITY_CHARS = 8;
+const PUNCT_PROXIMITY_CHARS_WEAK = 3;
 
 function isLeadingPunctRun(text: string, matchStart: number): boolean {
   return matchStart > 0 && NO_LINE_END_CHARS.has(text[matchStart - 1]);
@@ -278,21 +295,32 @@ function resolveCut(
       if (Math.abs(cut - expected) <= Math.max(ORIGINAL_PUNCT_TOLERANCE[boundary] * chunk, PUNCT_PROXIMITY_CHARS)) return [cut, "original"];
     }
   }
-  const inferred: number[] = [];
-  GENERAL_PUNCT_SEARCH_PATTERN.lastIndex = 0;
-  let gm: RegExpExecArray | null;
-  while ((gm = GENERAL_PUNCT_SEARCH_PATTERN.exec(text))) {
-    const end = gm.index + gm[0].length;
-    if (cursor < end && end < ceiling && !insideProtectedSpan(end, protectedSpans) && !isLeadingPunctRun(text, gm.index)) inferred.push(end);
+  const strong: number[] = [];
+  GENERAL_STRONG_PUNCT_PATTERN.lastIndex = 0;
+  let sm: RegExpExecArray | null;
+  while ((sm = GENERAL_STRONG_PUNCT_PATTERN.exec(text))) {
+    const end = sm.index + sm[0].length;
+    if (cursor < end && end < ceiling && !insideProtectedSpan(end, protectedSpans) && !isLeadingPunctRun(text, sm.index)) strong.push(end);
   }
   LEFT_CUT_PATTERN.lastIndex = 0;
   let lm: RegExpExecArray | null;
   while ((lm = LEFT_CUT_PATTERN.exec(text))) {
-    if (cursor < lm.index && lm.index < ceiling && !insideProtectedSpan(lm.index, protectedSpans)) inferred.push(lm.index);
+    if (cursor < lm.index && lm.index < ceiling && !insideProtectedSpan(lm.index, protectedSpans)) strong.push(lm.index);
   }
-  if (inferred.length) {
-    const cut = inferred.reduce((best, c) => (Math.abs(c - expected) < Math.abs(best - expected) ? c : best));
+  if (strong.length) {
+    const cut = strong.reduce((best, c) => (Math.abs(c - expected) < Math.abs(best - expected) ? c : best));
     if (Math.abs(cut - expected) <= Math.max(INFERRED_PUNCT_TOLERANCE * chunk, PUNCT_PROXIMITY_CHARS)) return [cut, "inferred"];
+  }
+  const weak: number[] = [];
+  GENERAL_WEAK_PUNCT_PATTERN.lastIndex = 0;
+  let wm: RegExpExecArray | null;
+  while ((wm = GENERAL_WEAK_PUNCT_PATTERN.exec(text))) {
+    const end = wm.index + wm[0].length;
+    if (cursor < end && end < ceiling && !insideProtectedSpan(end, protectedSpans) && !isLeadingPunctRun(text, wm.index)) weak.push(end);
+  }
+  if (weak.length) {
+    const cut = weak.reduce((best, c) => (Math.abs(c - expected) < Math.abs(best - expected) ? c : best));
+    if (Math.abs(cut - expected) <= Math.max(INFERRED_WEAK_PUNCT_TOLERANCE * chunk, PUNCT_PROXIMITY_CHARS_WEAK)) return [cut, "inferred"];
   }
   const boundaries = wordBoundaries(text.slice(cursor), cutFn)
     .map((b) => b + cursor)
@@ -321,6 +349,8 @@ function splitByBoundary(
 ): [string[], string] {
   const boundaryTypes = spans.slice(0, -1).map((span) => classifyBoundary(span.text));
   const anchors = punctuationAnchorsEnabled(sourceLang, targetLang) ? resolveAnchorCuts(translatedText, spans, boundaryTypes, protectedSpans) : new Map<number, number>();
+  const markerAnchors = resolveMarkerAnchors(translatedText, spans);
+  for (const [i, pos] of markerAnchors) anchors.set(i, pos);
   const lengths = spans.map((span) => effectiveLength(span.text));
   const total = lengths.reduce((a, b) => a + b, 0) || 1;
 
@@ -358,12 +388,14 @@ function splitByBoundary(
     }
     const maxCut = translatedText.length - (spanCount - 1 - i);
     const [cut, tag] = resolveCut(translatedText, cursor, expected, boundary, maxCut, protectedSpans, targetLang, cutFn, anchors.get(i));
-    tags.push(tag);
+    tags.push(markerAnchors.get(i) === cut ? "marker" : tag);
     parts.push(translatedText.slice(cursor, cut).trim());
     cursor = cut;
   }
   parts.push(translatedText.slice(cursor).trim());
-  const method = tags.includes("original") ? "original_boundary" : tags.includes("inferred") ? "inferred_punctuation" : "word_boundary";
+  const method = tags.includes("marker")
+    ? (tags.every((t) => t === null || t === "marker") ? "marker_boundary" : "mixed_boundary")
+    : tags.includes("original") ? "original_boundary" : tags.includes("inferred") ? "inferred_punctuation" : "word_boundary";
   return [parts, method];
 }
 
@@ -399,43 +431,6 @@ function enforceQuoteClosure(parts: string[], targetLang: string | undefined | n
   });
 }
 
-function splitByFullMarkers(translatedText: string, spans: Span[]): string[] | null {
-  const chunks = translatedText.split(MARKER_PATTERN);
-  if (chunks.length !== 1 + 2 * spans.length || chunks[0].trim()) return null;
-  const foundIds: number[] = [];
-  for (let i = 1; i < chunks.length; i += 2) foundIds.push(Number(chunks[i]));
-  const expectedIds = spans.map((s) => s.id);
-  if (foundIds.length !== expectedIds.length || foundIds.some((id, i) => id !== expectedIds[i])) return null;
-  const parts: string[] = [];
-  for (let i = 2; i < chunks.length; i += 2) parts.push(chunks[i].trim());
-  return parts;
-}
-
-function splitByMarkers(
-  translatedText: string, spans: Span[], protectedSpans: [number, number][], targetLang: string, sourceLang: string | undefined, cutFn: SyncCutter | null
-): string[] | null {
-  if (spans.length && spans.every((s) => s.boundary === "marker")) return splitByFullMarkers(translatedText, spans);
-  const expectedIds = spans.slice(1).filter((s) => s.boundary === "marker").map((s) => s.id);
-  if (!expectedIds.length) return null;
-  const foundIds = [...translatedText.matchAll(MARKER_PATTERN)].map((m) => Number(m[1]));
-  if (JSON.stringify(foundIds) !== JSON.stringify(expectedIds)) return null;
-  const cutIndices = spans.slice(1).map((span, idx) => ({ span, idx: idx + 1 })).filter(({ span }) => span.boundary === "marker").map(({ idx }) => idx);
-  const textChunks = translatedText.split(MARKER_PATTERN).filter((_, idx) => idx % 2 === 0);
-  const parts: string[] = [];
-  let cursor = 0;
-  cutIndices.forEach((cut, chunkIndex) => {
-    const subSpans = spans.slice(cursor, cut);
-    const subText = textChunks[chunkIndex];
-    const subParts = subSpans.length === 1 ? [subText.trim()] : splitByBoundary(subText, subSpans, protectedSpans, targetLang, sourceLang, cutFn)[0];
-    parts.push(...subParts);
-    cursor = cut;
-  });
-  const subSpans = spans.slice(cursor);
-  const subText = textChunks[textChunks.length - 1];
-  parts.push(...(subSpans.length === 1 ? [subText.trim()] : splitByBoundary(subText, subSpans, protectedSpans, targetLang, sourceLang, cutFn)[0]));
-  return parts;
-}
-
 function splitTranslation(
   translatedText: string, spans: Span[], protectedSpans: [number, number][], targetLang: string, sourceLang: string | undefined, cutFn: SyncCutter | null
 ): [string[], string] {
@@ -443,13 +438,7 @@ function splitTranslation(
   if (spans.length === 1) {
     [parts, method] = [[translatedText.trim()], "single"];
   } else {
-    const marked = splitByMarkers(translatedText, spans, protectedSpans, targetLang, sourceLang, cutFn);
-    if (marked !== null) {
-      [parts, method] = [marked, "marker_boundary"];
-    } else {
-      [parts, method] = splitByBoundary(translatedText, spans, protectedSpans, targetLang, sourceLang, cutFn);
-      if (spans.some((s) => s.boundary === "marker")) method = "marker_mismatch";
-    }
+    [parts, method] = splitByBoundary(translatedText, spans, protectedSpans, targetLang, sourceLang, cutFn);
   }
   parts = parts.map((p) => p.replace(RESIDUAL_MARKER_PATTERN, " ").trim());
   parts = enforcePunctuationPlacement(parts);
@@ -540,7 +529,7 @@ async function buildBilingualCues(
     const stripped = stripUnsourcedBrackets(spans.map((s) => s.text).join(""), translated);
     const protectedSpans = findProtectedSpans(stripped, glossaryTerms, targetLang);
     const [parts, method] = splitTranslation(stripped, spans, protectedSpans, targetLang, sourceLang, cutFn);
-    if (!["single", "original_boundary", "inferred_punctuation", "marker_boundary"].includes(method)) {
+    if (!["single", "original_boundary", "inferred_punctuation", "marker_boundary", "mixed_boundary"].includes(method)) {
       approxSplits.push({ unit_id: unit.id, cues: spans.map((s) => s.id), method });
     }
     spans.forEach((span, i) => {
